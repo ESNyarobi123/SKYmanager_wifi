@@ -17,6 +17,12 @@ new class extends Component
 
     public ?string $scriptRouterName = null;
 
+    public bool $showFullScriptModal = false;
+
+    public string $fullSetupScript = '';
+
+    public ?string $fullScriptRouterName = null;
+
     #[Validate('required|string|max:100')]
     public string $name = '';
 
@@ -32,6 +38,21 @@ new class extends Component
     #[Validate('required|string|max:100')]
     public string $apiPassword = '';
 
+    #[Validate('nullable|string|max:20')]
+    public string $wgAddress = '';
+
+    #[Validate('nullable|string|max:64')]
+    public string $hotspotSsid = '';
+
+    #[Validate('nullable|string|max:64')]
+    public string $hotspotInterface = '';
+
+    #[Validate('nullable|string|max:15')]
+    public string $hotspotGateway = '';
+
+    #[Validate('nullable|string|max:18')]
+    public string $hotspotNetwork = '';
+
     public function routers()
     {
         return Router::latest()->get();
@@ -39,8 +60,12 @@ new class extends Component
 
     public function openModal(?string $id = null): void
     {
-        $this->reset(['name', 'ipAddress', 'apiPort', 'apiUsername', 'apiPassword']);
+        $this->reset(['name', 'ipAddress', 'apiPort', 'apiUsername', 'apiPassword', 'wgAddress', 'hotspotSsid', 'hotspotInterface', 'hotspotGateway', 'hotspotNetwork']);
         $this->apiPort = 8728;
+        $this->hotspotSsid = 'PEACE';
+        $this->hotspotInterface = 'bridge';
+        $this->hotspotGateway = '192.168.88.1';
+        $this->hotspotNetwork = '192.168.88.0/24';
         $this->editingId = $id;
 
         if ($id) {
@@ -50,6 +75,11 @@ new class extends Component
             $this->apiPort = $router->api_port;
             $this->apiUsername = $router->api_username;
             $this->apiPassword = $router->api_password;
+            $this->wgAddress = $router->wg_address ?? '';
+            $this->hotspotSsid = $router->hotspot_ssid ?? 'PEACE';
+            $this->hotspotInterface = $router->hotspot_interface ?? 'bridge';
+            $this->hotspotGateway = $router->hotspot_gateway ?? '192.168.88.1';
+            $this->hotspotNetwork = $router->hotspot_network ?? '192.168.88.0/24';
         }
 
         $this->showModal = true;
@@ -60,11 +90,16 @@ new class extends Component
         $this->validate();
 
         $data = [
-            'name' => $this->name,
-            'ip_address' => $this->ipAddress,
-            'api_port' => $this->apiPort,
-            'api_username' => $this->apiUsername,
-            'api_password' => $this->apiPassword,
+            'name'               => $this->name,
+            'ip_address'         => $this->ipAddress,
+            'api_port'           => $this->apiPort,
+            'api_username'       => $this->apiUsername,
+            'api_password'       => $this->apiPassword,
+            'wg_address'         => $this->wgAddress ?: null,
+            'hotspot_ssid'       => $this->hotspotSsid ?: 'PEACE',
+            'hotspot_interface'  => $this->hotspotInterface ?: 'bridge',
+            'hotspot_gateway'    => $this->hotspotGateway ?: '192.168.88.1',
+            'hotspot_network'    => $this->hotspotNetwork ?: '192.168.88.0/24',
         ];
 
         if ($this->editingId) {
@@ -76,7 +111,7 @@ new class extends Component
         }
 
         $this->showModal = false;
-        $this->reset(['name', 'ipAddress', 'apiPort', 'apiUsername', 'apiPassword']);
+        $this->reset(['name', 'ipAddress', 'apiPort', 'apiUsername', 'apiPassword', 'wgAddress', 'hotspotSsid', 'hotspotInterface', 'hotspotGateway', 'hotspotNetwork']);
     }
 
     public function delete(string $id): void
@@ -118,20 +153,53 @@ new class extends Component
             session()->flash('error', "Failed to generate script: {$e->getMessage()}");
         }
     }
+
+    public function generateFullSetupScript(string $id, MikrotikApiService $mikrotik): void
+    {
+        $router = Router::findOrFail($id);
+
+        try {
+            $this->fullSetupScript = $mikrotik->generateFullSetupScript($router);
+            $this->fullScriptRouterName = $router->name;
+            $this->showFullScriptModal = true;
+        } catch (\Exception $e) {
+            session()->flash('error', "Failed to generate full setup script: {$e->getMessage()}");
+        }
+    }
+
+    public function applyCpdFix(string $id, MikrotikApiService $mikrotik): void
+    {
+        $router = Router::findOrFail($id);
+        $portalUrl = config('app.url').'/portal';
+
+        try {
+            $mikrotik->connect($router);
+            $mikrotik->configureCaptivePortal($portalUrl);
+            $mikrotik->disconnect();
+            $router->update(['is_online' => true, 'last_seen' => now()]);
+            session()->flash('status', "CPD fix applied to [{$router->name}]. login.html uploaded, hotspot profile updated.");
+        } catch (\Exception $e) {
+            session()->flash('error', "CPD fix failed on [{$router->name}]: {$e->getMessage()}");
+        }
+    }
 };
 ?>
 
 <div>
     <div class="flex items-center justify-between mb-6">
-        <flux:heading size="xl">Routers</flux:heading>
+        <h1 class="text-xl font-semibold text-gray-800 dark:text-neutral-200">Routers</h1>
         <flux:button wire:click="openModal" icon="plus" variant="primary">Add Router</flux:button>
     </div>
 
     @if (session('status'))
-        <flux:callout variant="success" icon="check-circle" class="mb-4">{{ session('status') }}</flux:callout>
+        <div class="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-4 dark:bg-emerald-800/10 dark:border-emerald-900 dark:text-emerald-500 mb-4" role="alert">
+            <div class="flex gap-x-3"><x-lucide name="check-circle" class="size-4 shrink-0 mt-0.5"/><p class="text-sm">{{ session('status') }}</p></div>
+        </div>
     @endif
     @if (session('error'))
-        <flux:callout variant="danger" icon="x-circle" class="mb-4">{{ session('error') }}</flux:callout>
+        <div class="bg-red-50 border border-red-200 text-red-800 rounded-xl p-4 dark:bg-red-800/10 dark:border-red-900 dark:text-red-500 mb-4" role="alert">
+            <div class="flex gap-x-3"><x-lucide name="x-circle" class="size-4 shrink-0 mt-0.5"/><p class="text-sm">{{ session('error') }}</p></div>
+        </div>
     @endif
 
     <flux:table>
@@ -173,10 +241,25 @@ new class extends Component
                                 wire:click="testConnection('{{ $router->id }}')"
                                 wire:loading.attr="disabled"
                                 wire:target="testConnection('{{ $router->id }}')">Test</flux:button>
-                            <flux:button size="sm" icon="command-line" variant="filled"
+                            <flux:button size="sm" icon="code-bracket" variant="filled"
+                                wire:click="generateFullSetupScript('{{ $router->id }}')"
+                                wire:loading.attr="disabled"
+                                wire:target="generateFullSetupScript('{{ $router->id }}')">
+                                <span wire:loading.remove wire:target="generateFullSetupScript('{{ $router->id }}')">Full Setup</span>
+                                <span wire:loading wire:target="generateFullSetupScript('{{ $router->id }}')">...</span>
+                            </flux:button>
+                            <flux:button size="sm" icon="command-line"
                                 wire:click="generateScript('{{ $router->id }}')"
                                 wire:loading.attr="disabled"
-                                wire:target="generateScript('{{ $router->id }}')">Setup</flux:button>
+                                wire:target="generateScript('{{ $router->id }}')">ZTP</flux:button>
+                            <flux:button size="sm" icon="wifi" variant="primary"
+                                wire:click="applyCpdFix('{{ $router->id }}')"
+                                wire:loading.attr="disabled"
+                                wire:target="applyCpdFix('{{ $router->id }}')"
+                                wire:confirm="Apply CPD fix to {{ $router->name }}? This uploads login.html and updates the hotspot profile.">
+                                <span wire:loading.remove wire:target="applyCpdFix('{{ $router->id }}')">CPD Fix</span>
+                                <span wire:loading wire:target="applyCpdFix('{{ $router->id }}')">...</span>
+                            </flux:button>
                             <flux:button size="sm" icon="pencil" wire:click="openModal('{{ $router->id }}')">Edit</flux:button>
                             <flux:button size="sm" icon="trash" variant="danger"
                                 wire:click="delete('{{ $router->id }}')"
@@ -189,19 +272,96 @@ new class extends Component
     </flux:table>
 
     {{-- Add / Edit Router Modal --}}
-    <flux:modal wire:model="showModal" class="w-full max-w-lg">
+    <flux:modal wire:model="showModal" class="w-full max-w-2xl">
         <div class="space-y-6">
-            <flux:heading size="lg">{{ $editingId ? 'Edit Router' : 'Add Router' }}</flux:heading>
-            <div class="flex flex-col gap-4">
-                <flux:input wire:model="name" label="Name" placeholder="HQ Router" />
-                <flux:input wire:model="ipAddress" label="IP Address" placeholder="192.168.88.1" />
-                <flux:input wire:model="apiPort" label="API Port" type="number" placeholder="8728" />
-                <flux:input wire:model="apiUsername" label="API Username" placeholder="admin" />
-                <flux:input wire:model="apiPassword" label="API Password" type="password" />
+            <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-200">{{ $editingId ? 'Edit Router' : 'Add Router' }}</h2>
+            <div class="grid grid-cols-1 gap-4">
+                <p class="text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wide">API Connection</p>
+                <div class="grid grid-cols-2 gap-4">
+                    <flux:input wire:model="name" label="Name" placeholder="HQ Router" class="col-span-2" />
+                    <flux:input wire:model="ipAddress" label="IP Address" placeholder="192.168.88.1" />
+                    <flux:input wire:model="apiPort" label="API Port" type="number" placeholder="8728" />
+                    <flux:input wire:model="apiUsername" label="API Username" placeholder="sky-api" />
+                    <flux:input wire:model="apiPassword" label="API Password" type="password" />
+                </div>
+                <flux:separator />
+                <p class="text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wide">WireGuard &amp; Hotspot (kwa Full Setup Script)</p>
+                <div class="grid grid-cols-2 gap-4">
+                    <flux:input wire:model="wgAddress" label="WireGuard Tunnel IP" placeholder="10.10.0.2/32" />
+                    <flux:input wire:model="hotspotSsid" label="WiFi SSID" placeholder="PEACE" />
+                    <flux:input wire:model="hotspotInterface" label="Bridge Interface" placeholder="bridge" />
+                    <flux:input wire:model="hotspotGateway" label="Hotspot Gateway IP" placeholder="192.168.88.1" />
+                    <flux:input wire:model="hotspotNetwork" label="Hotspot Network" placeholder="192.168.88.0/24" class="col-span-2" />
+                </div>
             </div>
             <div class="flex justify-end gap-2">
                 <flux:button wire:click="$set('showModal', false)" variant="ghost">Cancel</flux:button>
                 <flux:button wire:click="save" variant="primary">Save</flux:button>
+            </div>
+        </div>
+    </flux:modal>
+
+    {{-- Full MikroTik Setup Script Modal --}}
+    <flux:modal wire:model="showFullScriptModal" class="w-full max-w-4xl">
+        <div class="space-y-4"
+            x-data="{ copied: false, copy() {
+                navigator.clipboard.writeText(this.$refs.fullscript.innerText)
+                    .then(() => { this.copied = true; setTimeout(() => this.copied = false, 3000); });
+            } }">
+
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-200">Full MikroTik Setup Script</h2>
+                    <p class="text-sm text-gray-500 dark:text-neutral-500">{{ $fullScriptRouterName }} &mdash; Bandika kwenye MikroTik → New Terminal</p>
+                </div>
+                <button @click="copy()"
+                    class="shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors"
+                    :class="copied
+                        ? 'border-green-300 bg-green-50 text-green-700'
+                        : 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200'">
+                    <svg x-show="!copied" class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    <svg x-show="copied" class="h-3.5 w-3.5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    <span x-text="copied ? '✅ Nakiliwa!' : 'Nakili Script'"></span>
+                </button>
+            </div>
+
+            <div class="grid grid-cols-3 gap-3">
+                <div class="rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-900/20 p-3 text-xs text-blue-800 dark:text-blue-300">
+                    <div class="font-semibold mb-1">📋 Hatua 3 baada ya script:</div>
+                    <ol class="list-decimal list-inside space-y-0.5">
+                        <li>Run script kwenye New Terminal</li>
+                        <li>Nakili WireGuard Public Key</li>
+                        <li>Ongeza kwenye VPS kama peer</li>
+                    </ol>
+                </div>
+                <div class="rounded-lg border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 p-3 text-xs text-amber-800 dark:text-amber-300">
+                    <div class="font-semibold mb-1">⚠️ Angalizo:</div>
+                    <p>Badilisha <code class="font-mono">wifiIface</code> na <code class="font-mono">wanIface</code> kulingana na router yako (juu ya script).</p>
+                </div>
+                <div class="rounded-lg border border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-900/20 p-3 text-xs text-green-800 dark:text-green-300">
+                    <div class="font-semibold mb-1">✅ Script inafanya:</div>
+                    <p>WireGuard, Bridge, Hotspot, CPD, DNS Spoofing, DHCP Opt114, Walled Garden, API User, Firewall.</p>
+                </div>
+            </div>
+
+            <div class="rounded-xl bg-zinc-950 border border-zinc-800 overflow-auto max-h-[60vh]">
+                <pre x-ref="fullscript" class="p-4 text-xs leading-relaxed text-zinc-100 font-mono whitespace-pre">{{ $fullSetupScript }}</pre>
+            </div>
+
+            <div class="flex justify-end gap-2">
+                <button @click="copy()"
+                    class="inline-flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm font-medium transition-colors"
+                    :class="copied
+                        ? 'border-green-300 bg-green-50 text-green-700'
+                        : 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200'">
+                    <span x-text="copied ? '✅ Nakiliwa!' : '📋 Nakili Script'"></span>
+                </button>
+                <flux:button wire:click="$set('showFullScriptModal', false)" variant="primary">Funga</flux:button>
             </div>
         </div>
     </flux:modal>
@@ -216,8 +376,8 @@ new class extends Component
 
             <div class="flex items-start justify-between gap-4">
                 <div>
-                    <flux:heading size="lg">Zero-Touch Provisioning Script</flux:heading>
-                    <flux:subheading>{{ $scriptRouterName }} &mdash; paste into RouterOS terminal</flux:subheading>
+                    <h2 class="text-base font-semibold text-gray-800 dark:text-neutral-200">Zero-Touch Provisioning Script</h2>
+                    <p class="text-sm text-gray-500 dark:text-neutral-500">{{ $scriptRouterName }} &mdash; paste into RouterOS terminal</p>
                 </div>
                 <button @click="copy()"
                     class="shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors"

@@ -4,6 +4,7 @@ use App\Models\BillingPlan;
 use App\Models\Payment;
 use App\Models\Router;
 use App\Models\Subscription;
+use App\Models\Voucher;
 use App\Models\WifiUser;
 use App\Services\MikrotikApiService;
 use App\Services\PaymentGatewayService;
@@ -32,6 +33,8 @@ new class extends Component
     #[Validate(['required', 'regex:/^(\+?255|0)[67]\d{8}$/'])]
     public string $phone = '';
 
+    public string $voucherCode = '';
+
     public ?string $transactionId = null;
 
     public ?string $orderReference = null;
@@ -45,6 +48,59 @@ new class extends Component
     public function mount(): void
     {
         $this->mac = strtoupper($this->mac);
+    }
+
+    public function redeemVoucher(MikrotikApiService $mikrotik): void
+    {
+        $code = strtoupper(trim($this->voucherCode));
+
+        if (empty($code)) {
+            $this->errorMessage = 'Please enter a voucher code.';
+            return;
+        }
+
+        $this->errorMessage = null;
+
+        try {
+            $voucher = Voucher::redeem($code, $this->mac);
+
+            $router = Router::where('is_online', true)->first();
+
+            if (! $router) {
+                $this->errorMessage = 'No router available. Please try again later.';
+                return;
+            }
+
+            $wifiUser = WifiUser::firstOrCreate(
+                ['mac_address' => $this->mac],
+                ['phone_number' => '', 'is_active' => false]
+            );
+
+            Subscription::create([
+                'wifi_user_id' => $wifiUser->id,
+                'plan_id' => $voucher->plan_id,
+                'router_id' => $router->id,
+                'expires_at' => now()->addMinutes($voucher->plan->duration_minutes),
+                'status' => 'active',
+            ]);
+
+            try {
+                $mikrotik->connect($router);
+                $mikrotik->addHotspotUser(
+                    $wifiUser->mac_address,
+                    substr(md5($wifiUser->mac_address), 0, 8),
+                    $voucher->plan->name,
+                    $wifiUser->mac_address,
+                );
+                $mikrotik->disconnect();
+            } catch (\Exception) {
+            }
+
+            $wifiUser->update(['is_active' => true]);
+            $this->step = 'connected';
+        } catch (\Exception $e) {
+            $this->errorMessage = $e->getMessage();
+        }
     }
 
     public function plans()
@@ -190,7 +246,27 @@ new class extends Component
 
     {{-- Step: Plans --}}
     @if ($step === 'plans')
-        <div class="space-y-3">
+        {{-- Tab toggle --}}
+        <div class="flex rounded-xl overflow-hidden border border-gray-200 mb-4">
+            <button x-data x-on:click="$wire.set('voucherCode','')"
+                @click="$el.parentElement.querySelectorAll('[data-tab]').forEach(t=>t.classList.remove('bg-purple-800','text-white')); $el.classList.add('bg-purple-800','text-white')"
+                data-tab="pay"
+                class="flex-1 py-2.5 text-sm font-medium bg-purple-800 text-white transition-colors">
+                💳 Pay Now
+            </button>
+            <button
+                @click="$el.parentElement.querySelectorAll('[data-tab]').forEach(t=>t.classList.remove('bg-purple-800','text-white')); $el.classList.add('bg-purple-800','text-white')"
+                data-tab="voucher"
+                x-data="{ active: false }" @click="active=!active"
+                x-ref="voucherTab"
+                class="flex-1 py-2.5 text-sm font-medium text-gray-600 transition-colors"
+                x-on:click.once="document.getElementById('voucher-section').classList.remove('hidden'); document.getElementById('plans-section').classList.add('hidden')">
+                🎟 Voucher
+            </button>
+        </div>
+
+        {{-- Plans section --}}
+        <div id="plans-section" class="space-y-3">
             @foreach ($this->plans() as $plan)
                 <button wire:click="selectPlan('{{ $plan->id }}')" class="w-full text-left">
                     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 hover:border-purple-400 hover:shadow-md transition-all active:scale-95">
@@ -214,6 +290,26 @@ new class extends Component
                     </div>
                 </button>
             @endforeach
+        </div>
+
+        {{-- Voucher section --}}
+        <div id="voucher-section" class="hidden">
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
+                <div class="text-center">
+                    <div class="text-4xl mb-2">🎟</div>
+                    <p class="font-semibold text-gray-900">Redeem Voucher</p>
+                    <p class="text-xs text-gray-500 mt-1">Enter your voucher code to get internet access instantly.</p>
+                </div>
+                <div>
+                    <input wire:model="voucherCode" type="text" placeholder="Enter voucher code"
+                        class="w-full rounded-lg border border-gray-300 px-3 py-3 text-center text-lg font-mono tracking-widest uppercase focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none" />
+                </div>
+                <button wire:click="redeemVoucher" wire:loading.attr="disabled" wire:loading.class="opacity-60 cursor-not-allowed"
+                    class="w-full py-3 rounded-xl bg-purple-800 text-white font-semibold text-sm hover:bg-purple-700 active:scale-95 transition-all">
+                    <span wire:loading.remove wire:target="redeemVoucher">Redeem & Connect</span>
+                    <span wire:loading wire:target="redeemVoucher">Checking...</span>
+                </button>
+            </div>
         </div>
     @endif
 

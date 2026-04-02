@@ -37,17 +37,21 @@ new class extends Component
 <div wire:poll.10s>
     <div class="flex items-center justify-between mb-6">
         <div>
-            <flux:heading size="xl">Active Sessions</flux:heading>
-            <flux:text class="text-sm text-zinc-500">Auto-refreshes every 10 seconds</flux:text>
+            <h1 class="text-xl font-semibold text-gray-800 dark:text-neutral-200">Active Sessions</h1>
+            <p class="text-sm text-gray-500 dark:text-neutral-500 mt-0.5">Auto-refreshes every 10 seconds</p>
         </div>
         <flux:badge color="green" size="lg">{{ $this->activeSessions()->count() }} Online</flux:badge>
     </div>
 
     @if (session('status'))
-        <flux:callout variant="success" icon="check-circle" class="mb-4">{{ session('status') }}</flux:callout>
+        <div class="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl p-4 dark:bg-emerald-800/10 dark:border-emerald-900 dark:text-emerald-500 mb-4" role="alert">
+            <div class="flex gap-x-3"><x-lucide name="check-circle" class="size-4 shrink-0 mt-0.5"/><p class="text-sm">{{ session('status') }}</p></div>
+        </div>
     @endif
     @if (session('error'))
-        <flux:callout variant="danger" icon="x-circle" class="mb-4">{{ session('error') }}</flux:callout>
+        <div class="bg-red-50 border border-red-200 text-red-800 rounded-xl p-4 dark:bg-red-800/10 dark:border-red-900 dark:text-red-500 mb-4" role="alert">
+            <div class="flex gap-x-3"><x-lucide name="x-circle" class="size-4 shrink-0 mt-0.5"/><p class="text-sm">{{ session('error') }}</p></div>
+        </div>
     @endif
 
     <flux:table>

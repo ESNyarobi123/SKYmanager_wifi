@@ -21,6 +21,7 @@ class Subscription extends Model
         'router_id',
         'expires_at',
         'status',
+        'data_used_mb',
     ];
 
     protected function casts(): array
@@ -53,6 +54,11 @@ class Subscription extends Model
     public function latestPayment(): HasOne
     {
         return $this->hasOne(Payment::class)->latestOfMany();
+    }
+
+    public function invoice(): HasOne
+    {
+        return $this->hasOne(Invoice::class)->latestOfMany();
     }
 
     public function isExpired(): bool

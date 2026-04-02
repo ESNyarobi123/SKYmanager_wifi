@@ -19,6 +19,7 @@ class BillingPlan extends Model
         'duration_minutes',
         'upload_limit',
         'download_limit',
+        'data_quota_mb',
         'description',
         'is_active',
     ];
@@ -30,6 +31,7 @@ class BillingPlan extends Model
             'duration_minutes' => 'integer',
             'upload_limit' => 'integer',
             'download_limit' => 'integer',
+            'data_quota_mb' => 'integer',
             'is_active' => 'boolean',
         ];
     }

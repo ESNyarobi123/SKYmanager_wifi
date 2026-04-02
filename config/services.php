@@ -47,4 +47,11 @@ return [
         'sstp_secret' => env('ZTP_SSTP_SECRET'),
     ],
 
+    'wireguard' => [
+        'vps_endpoint' => env('WG_VPS_ENDPOINT'),
+        'vps_public_key' => env('WG_VPS_PUBLIC_KEY'),
+        'listen_port' => env('WG_LISTEN_PORT', 51820),
+        'api_subnet' => env('WG_API_SUBNET', '10.10.0.0/24'),
+    ],
+
 ];

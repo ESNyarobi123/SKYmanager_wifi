@@ -2,6 +2,7 @@
 
 use App\Models\Payment;
 use App\Models\Subscription;
+use App\Models\Voucher;
 use App\Models\WifiUser;
 use Illuminate\Support\Facades\DB;
 use Livewire\Component;
@@ -102,12 +103,32 @@ new class extends Component
             ->with('plan')
             ->get();
     }
+
+    public function voucherStats(): array
+    {
+        return [
+            'total' => Voucher::count(),
+            'unused' => Voucher::where('status', 'unused')->count(),
+            'used' => Voucher::where('status', 'used')->count(),
+            'expired' => Voucher::where('status', 'expired')->count(),
+        ];
+    }
+
+    public function paymentsByProvider(): \Illuminate\Support\Collection
+    {
+        return Payment::where('status', 'success')
+            ->select('provider', DB::raw('COUNT(*) as count'), DB::raw('SUM(amount) as total'))
+            ->groupBy('provider')
+            ->orderByDesc('total')
+            ->get();
+    }
+
 };
 ?>
 
 <div>
     {{-- If you do not have a consistent goal in life, you can not live it in a consistent way. - Marcus Aurelius --}}
-    <flux:heading size="xl" class="mb-6">Revenue Analytics</flux:heading>
+    <h1 class="text-xl font-semibold text-gray-800 dark:text-neutral-200 mb-6">Revenue Analytics</h1>
 
     {{-- KPI Cards --}}
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -131,7 +152,7 @@ new class extends Component
 
     {{-- Period Toggle --}}
     <div class="flex items-center gap-3 mb-4">
-        <flux:heading size="lg">Revenue Trend</flux:heading>
+        <h2 class="text-base font-semibold text-gray-700 dark:text-neutral-300">Revenue Trend</h2>
         <flux:button.group>
             <flux:button size="sm" :variant="$period === 'daily' ? 'primary' : 'ghost'" wire:click="$set('period', 'daily')">Daily</flux:button>
             <flux:button size="sm" :variant="$period === 'monthly' ? 'primary' : 'ghost'" wire:click="$set('period', 'monthly')">Monthly</flux:button>
@@ -155,24 +176,77 @@ new class extends Component
         </div>
     </flux:card>
 
-    {{-- Top Plans --}}
-    <flux:heading size="lg" class="mb-3">Top Plans by Subscriptions</flux:heading>
-    <flux:table>
-        <flux:table.columns>
-            <flux:table.column>Plan</flux:table.column>
-            <flux:table.column>Price</flux:table.column>
-            <flux:table.column>Subscriptions</flux:table.column>
-        </flux:table.columns>
-        <flux:table.rows>
-            @foreach ($this->topPlans() as $row)
-                <flux:table.row :key="$row->plan_id">
-                    <flux:table.cell class="font-semibold">{{ $row->plan?->name ?? 'Deleted' }}</flux:table.cell>
-                    <flux:table.cell>TZS {{ $row->plan ? number_format($row->plan->price, 0) : '—' }}</flux:table.cell>
-                    <flux:table.cell>
-                        <flux:badge color="purple" size="sm">{{ $row->count }}</flux:badge>
-                    </flux:table.cell>
-                </flux:table.row>
-            @endforeach
-        </flux:table.rows>
-    </flux:table>
+    <div class="grid lg:grid-cols-2 gap-8 mb-8">
+        {{-- Top Plans --}}
+        <div>
+            <h2 class="text-sm font-semibold text-gray-700 dark:text-neutral-300 mb-3">Top Plans by Subscriptions</h2>
+            <flux:table>
+                <flux:table.columns>
+                    <flux:table.column>Plan</flux:table.column>
+                    <flux:table.column>Price</flux:table.column>
+                    <flux:table.column>Count</flux:table.column>
+                </flux:table.columns>
+                <flux:table.rows>
+                    @foreach ($this->topPlans() as $row)
+                        <flux:table.row :key="$row->plan_id">
+                            <flux:table.cell class="font-semibold">{{ $row->plan?->name ?? 'Deleted' }}</flux:table.cell>
+                            <flux:table.cell>TZS {{ $row->plan ? number_format($row->plan->price, 0) : '—' }}</flux:table.cell>
+                            <flux:table.cell>
+                                <flux:badge color="purple" size="sm">{{ $row->count }}</flux:badge>
+                            </flux:table.cell>
+                        </flux:table.row>
+                    @endforeach
+                </flux:table.rows>
+            </flux:table>
+        </div>
+
+        {{-- Payments by Provider --}}
+        <div>
+            <h2 class="text-sm font-semibold text-gray-700 dark:text-neutral-300 mb-3">Revenue by Provider</h2>
+            <flux:table>
+                <flux:table.columns>
+                    <flux:table.column>Provider</flux:table.column>
+                    <flux:table.column>Transactions</flux:table.column>
+                    <flux:table.column>Revenue (TZS)</flux:table.column>
+                </flux:table.columns>
+                <flux:table.rows>
+                    @forelse ($this->paymentsByProvider() as $row)
+                        <flux:table.row :key="$row->provider">
+                            <flux:table.cell class="font-semibold">{{ $row->provider }}</flux:table.cell>
+                            <flux:table.cell>
+                                <flux:badge color="zinc" size="sm">{{ $row->count }}</flux:badge>
+                            </flux:table.cell>
+                            <flux:table.cell class="font-semibold text-purple-700">{{ number_format($row->total, 0) }}</flux:table.cell>
+                        </flux:table.row>
+                    @empty
+                        <flux:table.row>
+                            <flux:table.cell colspan="3" class="text-center text-zinc-400">No payments yet</flux:table.cell>
+                        </flux:table.row>
+                    @endforelse
+                </flux:table.rows>
+            </flux:table>
+        </div>
+    </div>
+
+    {{-- Voucher Stats --}}
+    @php $vs = $this->voucherStats(); @endphp
+    <h2 class="text-sm font-semibold text-gray-700 dark:text-neutral-300 mb-3">Voucher Overview</h2>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <flux:card class="text-center">
+            <div class="text-2xl font-bold text-zinc-700">{{ $vs['total'] }}</div>
+            <flux:text class="text-sm text-zinc-500">Total Issued</flux:text>
+        </flux:card>
+        <flux:card class="text-center">
+            <div class="text-2xl font-bold text-green-600">{{ $vs['unused'] }}</div>
+            <flux:text class="text-sm text-zinc-500">Unused</flux:text>
+        </flux:card>
+        <flux:card class="text-center">
+            <div class="text-2xl font-bold text-purple-700">{{ $vs['used'] }}</div>
+            <flux:text class="text-sm text-zinc-500">Redeemed</flux:text>
+        </flux:card>
+        <flux:card class="text-center">
+            <div class="text-2xl font-bold text-zinc-400">{{ $vs['expired'] }}</div>
+            <flux:text class="text-sm text-zinc-500">Expired</flux:text>
+        </flux:card>
+    </div>
 </div>

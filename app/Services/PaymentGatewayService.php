@@ -2,6 +2,9 @@
 
 namespace App\Services;
 
+use App\Models\CustomerPaymentGateway;
+use App\Models\Router;
+use App\Models\User;
 use Exception;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Cache;
@@ -12,9 +15,93 @@ class PaymentGatewayService
 {
     private const BASE_URL = 'https://api.clickpesa.com/third-parties';
 
-    private const TOKEN_CACHE_KEY = 'clickpesa_access_token';
-
     private const TOKEN_TTL_SECONDS = 3300;
+
+    /**
+     * System-level token cache key (backward-compatible with previous single key).
+     */
+    public const TOKEN_CACHE_KEY = 'clickpesa_access_token';
+
+    private string $clientId;
+
+    private string $apiKey;
+
+    private string $tokenCacheKey;
+
+    private bool $usingCustomerCredentials = false;
+
+    private ?string $gatewayId = null;
+
+    public function __construct()
+    {
+        $this->clientId = (string) config('services.clickpesa.client_id', '');
+        $this->apiKey = (string) config('services.clickpesa.api_key', '');
+        $this->tokenCacheKey = self::TOKEN_CACHE_KEY;
+    }
+
+    /**
+     * Return a new service instance configured with a specific customer's ClickPesa
+     * credentials. Falls back silently to system credentials when the customer has
+     * no active, configured gateway.
+     */
+    public static function forCustomer(User $customer): static
+    {
+        $instance = new static;
+
+        $gateway = $customer->paymentGateways()
+            ->where('gateway', 'clickpesa')
+            ->where('is_active', true)
+            ->first();
+
+        if ($gateway instanceof CustomerPaymentGateway && $gateway->isConfigured()) {
+            $instance->clientId = $gateway->consumer_key;
+            $instance->apiKey = $gateway->consumer_secret;
+            $instance->tokenCacheKey = 'clickpesa_token_'.$gateway->id;
+            $instance->usingCustomerCredentials = true;
+            $instance->gatewayId = $gateway->id;
+
+            $gateway->timestamps = false;
+            $gateway->update(['last_used_at' => now()]);
+            $gateway->timestamps = true;
+        }
+
+        return $instance;
+    }
+
+    /**
+     * Return a new service instance resolved from a router's owner.
+     * If the router is claimed by a user with an active gateway, that user's
+     * credentials are used. Otherwise falls back to system credentials.
+     */
+    public static function forRouter(Router $router): static
+    {
+        if ($router->user_id) {
+            $router->loadMissing('user');
+
+            if ($router->user instanceof User) {
+                return static::forCustomer($router->user);
+            }
+        }
+
+        return new static;
+    }
+
+    /**
+     * Whether this instance is using a specific customer's credentials
+     * (as opposed to the system-level fallback).
+     */
+    public function isUsingCustomerCredentials(): bool
+    {
+        return $this->usingCustomerCredentials;
+    }
+
+    /**
+     * The gateway record ID whose credentials are active, or null for system.
+     */
+    public function activeGatewayId(): ?string
+    {
+        return $this->gatewayId;
+    }
 
     /**
      * Preview a USSD push to check available payment channels before initiating.
@@ -119,16 +206,17 @@ class PaymentGatewayService
     /**
      * Obtain and cache a ClickPesa JWT access token.
      * The returned token string already contains the "Bearer " prefix.
+     * The cache key is per-credential-set so each customer gets their own token.
      *
      * @throws Exception
      */
     private function getAccessToken(): string
     {
-        return Cache::remember(self::TOKEN_CACHE_KEY, self::TOKEN_TTL_SECONDS, function () {
+        return Cache::remember($this->tokenCacheKey, self::TOKEN_TTL_SECONDS, function () {
             $response = Http::timeout(10)
                 ->post(self::BASE_URL.'/non-trade/users/generate-token', [
-                    'clientId' => config('services.clickpesa.client_id'),
-                    'apiKey' => config('services.clickpesa.api_key'),
+                    'clientId' => $this->clientId,
+                    'apiKey' => $this->apiKey,
                 ]);
 
             if (! $response->successful()) {
