@@ -705,7 +705,10 @@ class MikrotikApiService
         $apiPassword = bin2hex(random_bytes(12));
         $router->update(['ztp_api_password' => $apiPassword]);
 
-        $identity = preg_replace('/[^a-zA-Z0-9\-]/', '-', $router->name);
+        // Sanitise router name; trim dashes; fallback prevents empty identity error.
+        $identity = trim(preg_replace('/[^a-zA-Z0-9\-]/', '-', $router->name ?? ''), '-');
+        $identity = $identity ?: 'SKYmanager-Router';
+
         $portalUrl = $router->user ? $router->user->portalUrl() : url('/portal');
         $loginHtmlUrl = url('/hotspot-login.html');
         $portalDomain = config('services.ztp.portal_domain', 'micro.spotbox.online');
@@ -717,13 +720,17 @@ class MikrotikApiService
 
         $wgAddress = $router->wg_address ?: '10.10.0.2/32';
         $hotspotIface = $router->hotspot_interface ?: 'bridge';
-        $hotspotSsid = $router->hotspot_ssid ?: 'PEACE';
+        $hotspotSsid = str_replace('"', '', $router->hotspot_ssid ?: 'PEACE');
         $hotspotGw = $router->hotspot_gateway ?: '192.168.88.1';
         $hotspotNet = $router->hotspot_network ?: '192.168.88.0/24';
         $dhcpPool = $this->deriveDhcpPool($hotspotNet, $hotspotGw);
+        $apiUser = 'sky-api';
 
-        // Skip WireGuard setup entirely if VPS credentials are not configured
         $hasWg = $wgEndpoint !== '' && $wgVpsPubKey !== '' && ! str_contains($wgAddress, 'X');
+
+        // DHCP Option 114: hex-encode the URL so RouterOS never sees the 's' type
+        // prefix which triggers "Unknown data type!" on RouterOS 7.x in some builds.
+        $option114 = '0x'.bin2hex($portalUrl);
 
         $L = [];
 
@@ -738,25 +745,16 @@ class MikrotikApiService
         $L[] = '# PASTE KWENYE: MikroTik > New Terminal';
         $L[] = '# Script hii ni salama kurun mara nyingi (idempotent).';
         $L[] = '# ================================================================';
-        $L[] = '';
-
-        // ── Variables ─────────────────────────────────────────────────────
-        // MUHIMU: Hakuna maoni (# comment) mstari mmoja na :local -- RouterOS
-        // haitambui hilo na inasababisha "expected end of command" na kutoweka
-        // kwa variable yote inayofuata.
-        $L[] = '# ---- Angalia /interface print kwa majina halisi ya interfaces';
-        $L[] = ':local wifiIface "wlan1"';
-        $L[] = ':local wanIface "ether1"';
-        $L[] = ":local bridgeName \"{$hotspotIface}\"";
-        $L[] = ":local hotspotGw \"{$hotspotGw}\"";
-        $L[] = ":local ssid \"{$hotspotSsid}\"";
-        $L[] = ':local apiUser "sky-api"';
-        $L[] = ":local apiPassword \"{$apiPassword}\"";
-        $L[] = ":local routerName \"{$identity}\"";
+        $L[] = '# ANGALIZO: Kama WiFi interface yako si "wlan1" au WAN si "ether1",';
+        $L[] = '# endesha /interface print kwenye terminal, kisha badilisha majina';
+        $L[] = '# mawili hayo pekee katika script hii kabla ya kurun.';
+        $L[] = '# ================================================================';
         $L[] = '';
 
         // ── RouterOS version detection ────────────────────────────────────
-        $L[] = '# ---- Gundua toleo la RouterOS (v6 au v7)';
+        // These are the ONLY two RouterOS :local variables in this script.
+        // ALL other values are embedded directly from PHP to avoid the
+        // "ambiguous value / empty variable / invalid value" class of errors.
         $L[] = ':local rosVer [/system resource get version]';
         $L[] = ':local rosMajor [:tonum [:pick $rosVer 0 [:find $rosVer "."]]]';
         $L[] = ':put "================================================================"';
@@ -766,7 +764,7 @@ class MikrotikApiService
 
         // ── HATUA 1: Identity ─────────────────────────────────────────────
         $L[] = '# ---- HATUA 1: Jina la Router';
-        $L[] = '/system identity set name=$routerName';
+        $L[] = ":do { /system identity set name=\"{$identity}\" } on-error={ :put \"ONYO: Identity haikuwekwa\" }";
         $L[] = '';
 
         // ── HATUA 2-4: WireGuard (skipped when not configured) ───────────
@@ -789,27 +787,26 @@ class MikrotikApiService
             $L[] = '}';
             $L[] = '';
         } else {
-            $L[] = '# ---- HATUA 2-4: WireGuard imeachwa -- weka VPS config kwenye .env na uzalishe upya';
+            $L[] = '# ---- HATUA 2-4: WireGuard imeachwa -- weka VPS config kwenye .env';
             $L[] = '';
         }
 
-        // ── HATUA 5: Bridge ───────────────────────────────────────────────
+        // ── HATUA 5: Bridge + WiFi port ───────────────────────────────────
         $L[] = '# ---- HATUA 5: Bridge na WiFi Interface';
-        $L[] = ':if ([:len [/interface bridge find name=$bridgeName]] = 0) do={';
-        $L[] = '    /interface bridge add name=$bridgeName comment="SKYmanager Bridge"';
+        $L[] = ":if ([:len [/interface bridge find name=\"{$hotspotIface}\"]] = 0) do={";
+        $L[] = "    /interface bridge add name=\"{$hotspotIface}\" comment=\"SKYmanager Bridge\"";
         $L[] = '}';
         $L[] = ':do {';
-        $L[] = '    :if ([:len [/interface bridge port find interface=$wifiIface bridge=$bridgeName]] = 0) do={';
-        $L[] = '        /interface bridge port add interface=$wifiIface bridge=$bridgeName';
+        $L[] = "    :if ([:len [/interface bridge port find interface=\"wlan1\" bridge=\"{$hotspotIface}\"]] = 0) do={";
+        $L[] = "        /interface bridge port add interface=\"wlan1\" bridge=\"{$hotspotIface}\"";
         $L[] = '    }';
-        $L[] = '} on-error={ :put "ONYO: Badilisha wifiIface kulingana na /interface print" }';
+        $L[] = '} on-error={ :put "ONYO: Badilisha wlan1 kwa jina halisi la WiFi interface (/interface print)" }';
         $L[] = '';
 
-        // ── HATUA 6: IP on bridge ─────────────────────────────────────────
-        // Hardcode the full address/prefix -- avoids RouterOS string concat issues
+        // ── HATUA 6: IP address on bridge ─────────────────────────────────
         $L[] = '# ---- HATUA 6: IP ya Gateway kwenye Bridge';
-        $L[] = ':if ([:len [/ip address find interface=$bridgeName]] = 0) do={';
-        $L[] = "    /ip address add address=\"{$hotspotGw}/24\" interface=\$bridgeName comment=\"SKYmanager Hotspot GW\"";
+        $L[] = ":if ([:len [/ip address find address=\"{$hotspotGw}/24\"]] = 0) do={";
+        $L[] = "    /ip address add address=\"{$hotspotGw}/24\" interface=\"{$hotspotIface}\" comment=\"SKYmanager Hotspot GW\"";
         $L[] = '}';
         $L[] = '';
 
@@ -819,17 +816,16 @@ class MikrotikApiService
         $L[] = "    /ip pool add name=\"sky-pool\" ranges=\"{$dhcpPool}\"";
         $L[] = '}';
         $L[] = ':if ([:len [/ip dhcp-server find name="sky-dhcp"]] = 0) do={';
-        $L[] = '    /ip dhcp-server add name="sky-dhcp" interface=$bridgeName address-pool="sky-pool" lease-time=1h disabled=no comment="SKYmanager DHCP"';
+        $L[] = "    /ip dhcp-server add name=\"sky-dhcp\" interface=\"{$hotspotIface}\" address-pool=\"sky-pool\" lease-time=1h disabled=no comment=\"SKYmanager DHCP\"";
         $L[] = "    /ip dhcp-server network add address=\"{$hotspotNet}\" gateway=\"{$hotspotGw}\" dns-server=\"{$hotspotGw}\" comment=\"SKYmanager DHCP Network\"";
         $L[] = '}';
         $L[] = '';
 
         // ── HATUA 8: DHCP Option 114 (RFC 7710) ──────────────────────────
-        // URL hardcoded at PHP generation time -- avoids RouterOS variable concat
-        // which fails with "Unknown data type!" when variable is empty.
         $L[] = '# ---- HATUA 8: DHCP Option 114 (RFC 7710 -- CPD auto-popup)';
+        $L[] = "# URL: {$portalUrl}";
         $L[] = ':if ([:len [/ip dhcp-server option find name="captive-portal"]] = 0) do={';
-        $L[] = "    /ip dhcp-server option add name=\"captive-portal\" code=114 value=\"'s'{$portalUrl}\" comment=\"SKYmanager RFC7710\"";
+        $L[] = "    /ip dhcp-server option add name=\"captive-portal\" code=114 value=\"{$option114}\" comment=\"SKYmanager RFC7710\"";
         $L[] = '}';
         $L[] = ':if ([:len [/ip dhcp-server option sets find name="sky-opt-set"]] = 0) do={';
         $L[] = '    /ip dhcp-server option sets add name="sky-opt-set" options="captive-portal"';
@@ -845,9 +841,10 @@ class MikrotikApiService
         $L[] = '';
 
         // ── HATUA 10: DNS Static (CPD Spoofing) ──────────────────────────
+        // Hardcode the IP literal -- avoids "invalid value for argument address"
+        // that occurs when RouterOS 7 refuses to coerce a string-typed local to IP.
         $L[] = '# ---- HATUA 10: DNS Static kwa CPD (Captive Portal Detection)';
         $L[] = '# Android, iOS, Windows, Firefox zinatumia URLs hizi kupima internet.';
-        $L[] = '# Tunazijibu na IP ya hotspot ili zifungue popup ya captive portal.';
 
         $cpdHosts = [
             'connectivitycheck.gstatic.com',
@@ -866,29 +863,27 @@ class MikrotikApiService
 
         foreach ($cpdHosts as $host) {
             $L[] = ":if ([:len [/ip dns static find name=\"{$host}\"]] = 0) do={";
-            $L[] = "    /ip dns static add name=\"{$host}\" address=\$hotspotGw comment=\"SKYmanager CPD\"";
+            $L[] = "    /ip dns static add name=\"{$host}\" address={$hotspotGw} comment=\"SKYmanager CPD\"";
             $L[] = '}';
         }
         $L[] = '';
 
         // ── HATUA 11: NAT ─────────────────────────────────────────────────
-        // Hardcode subnet values -- RouterOS variable expansion is unreliable
-        // in nat src-address when variables are set via script locals.
         $L[] = '# ---- HATUA 11: NAT (Masquerade)';
         $L[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT-Hotspot"]] = 0) do={';
-        $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$hotspotNet}\" out-interface=\$wanIface action=masquerade comment=\"SKY-NAT-Hotspot\"";
+        $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$hotspotNet}\" out-interface=\"ether1\" action=masquerade comment=\"SKY-NAT-Hotspot\"";
         $L[] = '}';
         if ($hasWg) {
             $L[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT-WireGuard"]] = 0) do={';
-            $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$apiSubnet}\" out-interface=\$wanIface action=masquerade comment=\"SKY-NAT-WireGuard\"";
+            $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$apiSubnet}\" out-interface=\"ether1\" action=masquerade comment=\"SKY-NAT-WireGuard\"";
             $L[] = '}';
         }
         $L[] = '';
 
         // ── HATUA 12: Hotspot ─────────────────────────────────────────────
         $L[] = '# ---- HATUA 12: Hotspot';
-        $L[] = ':if ([:len [/ip hotspot find interface=$bridgeName]] = 0) do={';
-        $L[] = '    /ip hotspot add name="sky-hotspot" interface=$bridgeName address-pool="sky-pool" disabled=no';
+        $L[] = ":if ([:len [/ip hotspot find interface=\"{$hotspotIface}\"]] = 0) do={";
+        $L[] = "    /ip hotspot add name=\"sky-hotspot\" interface=\"{$hotspotIface}\" address-pool=\"sky-pool\" disabled=no";
         $L[] = '}';
         $L[] = '';
 
@@ -903,8 +898,6 @@ class MikrotikApiService
         $L[] = '';
 
         // ── HATUA 14: Hotspot profile ─────────────────────────────────────
-        // Portaldomein hardcoded -- avoids variable parsing ambiguity.
-        // Single-line commands used -- \ continuation is unreliable inside do={}.
         $L[] = '# ---- HATUA 14: Hotspot Profile';
         $L[] = ':if ($rosMajor >= 7) do={';
         $L[] = "    /ip hotspot profile set [find] html-directory=\"hotspot\" login-by=\"http-chap,http-pap,cookie\" dns-name=\"{$portalDomain}\" http-cookie-lifetime=30m";
@@ -915,12 +908,7 @@ class MikrotikApiService
 
         // ── HATUA 15: Walled Garden ───────────────────────────────────────
         $L[] = '# ---- HATUA 15: Walled Garden (portal + malipo)';
-        $wgEntries = [
-            "*.{$portalDomain}",
-            $portalDomain,
-            '*.clickpesa.com',
-            'api.clickpesa.com',
-        ];
+        $wgEntries = ["*.{$portalDomain}", $portalDomain, '*.clickpesa.com', 'api.clickpesa.com'];
         if ($vpsIp) {
             $wgEntries[] = $vpsIp;
         }
@@ -929,7 +917,6 @@ class MikrotikApiService
             $L[] = "    /ip hotspot walled-garden add dst-host=\"{$wgHost}\" action=allow comment=\"SKYmanager\"";
             $L[] = '}';
         }
-        // Idempotent HTTPS passthrough
         $L[] = ':if ([:len [/ip hotspot walled-garden ip find comment="SKY-WG-HTTPS"]] = 0) do={';
         $L[] = '    /ip hotspot walled-garden ip add dst-address=0.0.0.0/0 protocol=tcp dst-port=443 action=allow comment="SKY-WG-HTTPS"';
         $L[] = '}';
@@ -938,8 +925,8 @@ class MikrotikApiService
         // ── HATUA 16: WiFi SSID ───────────────────────────────────────────
         $L[] = '# ---- HATUA 16: WiFi SSID';
         $L[] = ':do {';
-        $L[] = '    /interface wireless set [find] ssid=$ssid disabled=no';
-        $L[] = '    :put ("SSID: " . $ssid)';
+        $L[] = "    /interface wireless set [find] ssid=\"{$hotspotSsid}\" disabled=no";
+        $L[] = "    :put \"SSID imewekwa: {$hotspotSsid}\"";
         $L[] = '} on-error={ :put "ONYO: Wireless interface haikupatikana -- imerukwa" }';
         $L[] = '';
 
@@ -948,19 +935,18 @@ class MikrotikApiService
         $L[] = ':if ([:len [/user group find name="sky-managers"]] = 0) do={';
         $L[] = '    /user group add name="sky-managers" policy="read,write,policy,test,api,winbox" comment="SKYmanager API Group"';
         $L[] = '}';
-        $L[] = ':if ([:len [/user find name=$apiUser]] = 0) do={';
-        $L[] = '    /user add name=$apiUser password=$apiPassword group="sky-managers" comment="SKYmanager API"';
-        $L[] = '    :put ("API user imeundwa: " . $apiUser)';
+        $L[] = ":if ([:len [/user find name=\"{$apiUser}\"]] = 0) do={";
+        $L[] = "    /user add name=\"{$apiUser}\" password=\"{$apiPassword}\" group=\"sky-managers\" comment=\"SKYmanager API\"";
+        $L[] = "    :put \"API user imeundwa: {$apiUser}\"";
         $L[] = '} else={';
-        $L[] = '    /user set [find name=$apiUser] password=$apiPassword group="sky-managers"';
+        $L[] = "    /user set [find name=\"{$apiUser}\"] password=\"{$apiPassword}\" group=\"sky-managers\"";
         $L[] = '    :put "API user password imesasishwa"';
         $L[] = '}';
         $L[] = '';
 
         // ── HATUA 18: Remove default admin ───────────────────────────────
-        // Only remove admin AFTER confirming sky-api user was created successfully.
         $L[] = '# ---- HATUA 18: Futa admin ya default (usalama)';
-        $L[] = ':if ([:len [/user find name=$apiUser]] > 0) do={';
+        $L[] = ":if ([:len [/user find name=\"{$apiUser}\"]] > 0) do={";
         $L[] = '    :if ([:len [/user find name="admin"]] > 0) do={';
         $L[] = '        /user remove [find name="admin"]';
         $L[] = '        :put "Admin ya default imefutwa"';
@@ -969,7 +955,6 @@ class MikrotikApiService
         $L[] = '';
 
         // ── HATUA 19: Lock down services ──────────────────────────────────
-        // Hardcode apiSubnet -- /ip service set address= does not expand locals.
         $L[] = '# ---- HATUA 19: Zuia Huduma Zisizo Hitajika';
         $L[] = ":do { /ip service set api port=8728 disabled=no address=\"{$apiSubnet}\" } on-error={}";
         $L[] = ':do { /ip service set winbox disabled=no } on-error={}';
@@ -980,8 +965,6 @@ class MikrotikApiService
         $L[] = '';
 
         // ── HATUA 20: Firewall ────────────────────────────────────────────
-        // All IP/port values hardcoded -- RouterOS variable expansion is unreliable
-        // in filter src-address. Negation (!subnet) must use literal value, not !$var.
         $L[] = '# ---- HATUA 20: Firewall (accept kabla ya drop)';
         $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-Established"]] = 0) do={';
         $L[] = '    /ip firewall filter add chain=forward connection-state=established,related action=accept comment="SKY-FW-Established" place-before=0';
@@ -1006,27 +989,28 @@ class MikrotikApiService
         $L[] = '# ---- MWISHO: Mafanikio!';
         if ($hasWg) {
             $L[] = ':local wgPubKey [/interface wireguard get [find name="wg-sky"] public-key]';
-        } else {
-            $L[] = ':local wgPubKey "(WireGuard haijaendelezwa -- weka VPS config kwenye .env)"';
-        }
-        $L[] = ':put ""';
-        $L[] = ':put "================================================================"';
-        $L[] = ':put "   SKYmanager Setup IMEKAMILIKA! Hongera!"';
-        $L[] = ':put "================================================================"';
-        $L[] = ':put ""';
-        $L[] = ':put "WireGuard Public Key ya Router Hii:"';
-        $L[] = ':put $wgPubKey';
-        $L[] = ':put ""';
-        if ($hasWg) {
+            $L[] = ':put ""';
+            $L[] = ':put "================================================================"';
+            $L[] = ':put "   SKYmanager Setup IMEKAMILIKA! Hongera!"';
+            $L[] = ':put "================================================================"';
+            $L[] = ':put ""';
+            $L[] = ':put "WireGuard Public Key ya Router Hii:"';
+            $L[] = ':put $wgPubKey';
+            $L[] = ':put ""';
             $L[] = ':put "Amri ya VPS (iendesha kwenye Linux VPS):"';
             $L[] = ":put (\"  sudo wg set wg0 peer \" . \$wgPubKey . \" allowed-ips {$wgAddress} persistent-keepalive 25\")";
+        } else {
             $L[] = ':put ""';
+            $L[] = ':put "================================================================"';
+            $L[] = ':put "   SKYmanager Setup IMEKAMILIKA! Hongera!"';
+            $L[] = ':put "================================================================"';
         }
+        $L[] = ':put ""';
         $L[] = ':put "================================================================"';
         $L[] = ':put "   SKYmanager API Credentials"';
         $L[] = ':put "================================================================"';
-        $L[] = ':put ("  Mtumiaji  : " . $apiUser)';
-        $L[] = ':put ("  Nenosiri  : " . $apiPassword)';
+        $L[] = ":put \"  Mtumiaji  : {$apiUser}\"";
+        $L[] = ":put \"  Nenosiri  : {$apiPassword}\"";
         $L[] = ':put "  Bandari   : 8728"';
         $L[] = ':put ""';
         $L[] = ':put "Hatua Inayofuata:"';
