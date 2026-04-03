@@ -706,7 +706,8 @@ class MikrotikApiService
         $router->update(['ztp_api_password' => $apiPassword]);
 
         $identity = preg_replace('/[^a-zA-Z0-9\-]/', '-', $router->name);
-        $portalUrl = $router->user ? $router->user->portalUrl() : rtrim(config('app.url'), '/').'/portal';
+        $portalUrl = $router->user ? $router->user->portalUrl() : url('/portal');
+        $loginHtmlUrl = url('/hotspot-login.html');
         $portalDomain = config('services.ztp.portal_domain', 'micro.spotbox.online');
         $vpsIp = config('services.ztp.vps_ip', '');
         $apiSubnet = config('services.wireguard.api_subnet', '10.10.0.0/24');
@@ -714,415 +715,329 @@ class MikrotikApiService
         $wgVpsPubKey = config('services.wireguard.vps_public_key', '');
         $wgListenPort = (int) config('services.wireguard.listen_port', 51820);
 
-        $wgAddress = $router->wg_address ?: '10.10.0.X/32';
+        $wgAddress = $router->wg_address ?: '10.10.0.2/32';
         $hotspotIface = $router->hotspot_interface ?: 'bridge';
         $hotspotSsid = $router->hotspot_ssid ?: 'PEACE';
         $hotspotGw = $router->hotspot_gateway ?: '192.168.88.1';
         $hotspotNet = $router->hotspot_network ?: '192.168.88.0/24';
         $dhcpPool = $this->deriveDhcpPool($hotspotNet, $hotspotGw);
-        $loginHtmlUrl = config('app.url').'/hotspot-login.html';
 
-        $lines = [];
+        // Skip WireGuard setup entirely if VPS credentials are not configured
+        $hasWg = $wgEndpoint !== '' && $wgVpsPubKey !== '' && ! str_contains($wgAddress, 'X');
 
-        $lines[] = '# ================================================================';
-        $lines[] = '# 🛜  SKYmanager — Full Automatic MikroTik Setup Script';
-        $lines[] = "#     Router   : {$router->name}";
-        $lines[] = "#     VPS      : {$vpsIp}";
-        $lines[] = "#     Portal   : {$portalUrl}";
-        $lines[] = '#     Tarehe   : '.now()->toDateTimeString();
-        $lines[] = '# ================================================================';
-        $lines[] = '# ⚠️  PASTE HAPA KWENYE: MikroTik → New Terminal';
-        $lines[] = '#     Script hii ni salama kurun mara nyingi (idempotent).';
-        $lines[] = '# ================================================================';
-        $lines[] = '';
+        $L = [];
 
-        $lines[] = '# ── BADILISHA HIZI KULINGANA NA ROUTER YAKO ─────────────────────';
-        $lines[] = '# Angalia /interface print kwa majina halisi ya interfaces';
-        $lines[] = ':local wifiIface    "wlan1"         # Interface ya WiFi';
-        $lines[] = ':local wanIface     "ether1"        # Interface ya WAN/Internet';
-        $lines[] = ":local bridgeName   \"{$hotspotIface}\"           # Bridge interface ya hotspot";
-        $lines[] = ":local hotspotIP    \"{$hotspotGw}\"      # IP ya Gateway";
-        $lines[] = ":local hotspotNet   \"{$hotspotNet}\"  # Subnet ya wateja";
-        $lines[] = ":local dhcpPool     \"{$dhcpPool}\"";
-        $lines[] = ":local ssid         \"{$hotspotSsid}\"         # Jina la WiFi (SSID)";
-        $lines[] = ":local wgAddress    \"{$wgAddress}\"      # WireGuard tunnel IP ya router hii";
-        $lines[] = ":local wgEndpoint   \"{$wgEndpoint}\"  # VPS IP:Port ya WireGuard";
-        $lines[] = ":local wgVpsPubKey  \"{$wgVpsPubKey}\"";
-        $lines[] = ":local wgListenPort {$wgListenPort}";
-        $lines[] = ":local apiSubnet    \"{$apiSubnet}\"  # VPN subnet (kwa API access)";
-        $lines[] = ":local portalDomain \"{$portalDomain}\"";
-        $lines[] = ":local portalUrl    \"{$portalUrl}\"";
-        $lines[] = ":local loginHtmlUrl \"{$loginHtmlUrl}\"";
-        $lines[] = ":local routerName   \"{$identity}\"";
-        $lines[] = ':local apiUser      "sky-api"';
-        $lines[] = ":local apiPassword  \"{$apiPassword}\"";
-        $lines[] = '';
-        $lines[] = '# ── GUNDUA TOLEO LA RouterOS (v6 au v7) — lazima kwanza ──────────';
-        $lines[] = '# Hii lazima iwe KABLA ya hatua zote zinazotumia $rosMajor';
-        $lines[] = ':local rosVer [/system package get "routeros" version]';
-        $lines[] = ':local rosMajor [:tonum [:pick $rosVer 0 [:find $rosVer "."]]]';
-        $lines[] = ':put "================================================================"';
-        $lines[] = ':put ("  RouterOS toleo: " . $rosVer . "  (major: " . $rosMajor . ")")';
-        $lines[] = ':put "================================================================"';
-        $lines[] = ':log info ("SKYmanager: RouterOS " . $rosVer . " imegunduliwa")';
-        $lines[] = '';
+        // ── Header ────────────────────────────────────────────────────────
+        $L[] = '# ================================================================';
+        $L[] = '# SKYmanager -- Full Automatic MikroTik Setup Script';
+        $L[] = "# Router  : {$router->name}";
+        $L[] = "# VPS     : {$vpsIp}";
+        $L[] = "# Portal  : {$portalUrl}";
+        $L[] = '# Tarehe  : '.now()->toDateTimeString();
+        $L[] = '# ================================================================';
+        $L[] = '# PASTE KWENYE: MikroTik > New Terminal';
+        $L[] = '# Script hii ni salama kurun mara nyingi (idempotent).';
+        $L[] = '# ================================================================';
+        $L[] = '';
 
-        // ── Identity ──────────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 1: Weka Jina la Router ────────────────────────────────';
-        $lines[] = '/system identity set name=$routerName';
-        $lines[] = ':log info ("SKYmanager: Jina la router limewekwa: " . $routerName)';
-        $lines[] = '';
+        // ── Variables ─────────────────────────────────────────────────────
+        // MUHIMU: Hakuna maoni (# comment) mstari mmoja na :local -- RouterOS
+        // haitambui hilo na inasababisha "expected end of command" na kutoweka
+        // kwa variable yote inayofuata.
+        $L[] = '# ---- Angalia /interface print kwa majina halisi ya interfaces';
+        $L[] = ':local wifiIface "wlan1"';
+        $L[] = ':local wanIface "ether1"';
+        $L[] = ":local bridgeName \"{$hotspotIface}\"";
+        $L[] = ":local hotspotGw \"{$hotspotGw}\"";
+        $L[] = ":local ssid \"{$hotspotSsid}\"";
+        $L[] = ':local apiUser "sky-api"';
+        $L[] = ":local apiPassword \"{$apiPassword}\"";
+        $L[] = ":local routerName \"{$identity}\"";
+        $L[] = '';
 
-        // ── WireGuard interface ──────────────────────────────────────────
-        $lines[] = '# ── HATUA 2: Tengeneza WireGuard Interface (VPN Tunnel) ─────────';
-        $lines[] = ':if ([:len [/interface wireguard find name="wg-sky"]] = 0) do={';
-        $lines[] = '    /interface wireguard add name="wg-sky" \\';
-        $lines[] = '        listen-port=$wgListenPort \\';
-        $lines[] = '        comment="SKYmanager WireGuard VPN"';
-        $lines[] = '    :log info "SKYmanager: WireGuard interface imeundwa"';
-        $lines[] = '} else={';
-        $lines[] = '    :log info "SKYmanager: WireGuard interface tayari ipo"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── RouterOS version detection ────────────────────────────────────
+        $L[] = '# ---- Gundua toleo la RouterOS (v6 au v7)';
+        $L[] = ':local rosVer [/system resource get version]';
+        $L[] = ':local rosMajor [:tonum [:pick $rosVer 0 [:find $rosVer "."]]]';
+        $L[] = ':put "================================================================"';
+        $L[] = ':put ("RouterOS: " . $rosVer)';
+        $L[] = ':put "================================================================"';
+        $L[] = '';
 
-        // ── WireGuard peer (VPS) ─────────────────────────────────────────
-        $lines[] = '# ── HATUA 3: Ongeza VPS kama WireGuard Peer ─────────────────────';
-        $lines[] = ':if ([:len [/interface wireguard peers find comment="SKYmanager-VPS"]] = 0) do={';
-        $lines[] = '    /interface wireguard peers add \\';
-        $lines[] = '        interface="wg-sky" \\';
-        $lines[] = '        public-key=$wgVpsPubKey \\';
-        $lines[] = '        endpoint-address=$wgEndpoint \\';
-        $lines[] = '        allowed-address=$apiSubnet \\';
-        $lines[] = '        persistent-keepalive=25s \\';
-        $lines[] = '        comment="SKYmanager-VPS"';
-        $lines[] = '    :log info "SKYmanager: WireGuard peer ya VPS imeongezwa"';
-        $lines[] = '} else={';
-        $lines[] = '    :log info "SKYmanager: WireGuard peer tayari ipo"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 1: Identity ─────────────────────────────────────────────
+        $L[] = '# ---- HATUA 1: Jina la Router';
+        $L[] = '/system identity set name=$routerName';
+        $L[] = '';
 
-        // ── WireGuard IP ─────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 4: Weka IP kwenye WireGuard Interface ─────────────────';
-        $lines[] = ':if ([:len [/ip address find interface="wg-sky"]] = 0) do={';
-        $lines[] = '    /ip address add address=$wgAddress interface="wg-sky" comment="SKYmanager WG IP"';
-        $lines[] = '    :log info "SKYmanager: WireGuard IP imewekwa"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 2-4: WireGuard (skipped when not configured) ───────────
+        if ($hasWg) {
+            $L[] = '# ---- HATUA 2: WireGuard Interface';
+            $L[] = ':if ([:len [/interface wireguard find name="wg-sky"]] = 0) do={';
+            $L[] = "    /interface wireguard add name=\"wg-sky\" listen-port={$wgListenPort} comment=\"SKYmanager VPN\"";
+            $L[] = '}';
+            $L[] = '';
 
-        // ── Bridge setup ─────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 5: Tengeneza Bridge na Ongeza WiFi Interface ───────────';
-        $lines[] = ':if ([:len [/interface bridge find name=$bridgeName]] = 0) do={';
-        $lines[] = '    /interface bridge add name=$bridgeName comment="SKYmanager Bridge"';
-        $lines[] = '    :log info "SKYmanager: Bridge imeundwa"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/interface bridge port find interface=$wifiIface]] = 0) do={';
-        $lines[] = '    /interface bridge port add interface=$wifiIface bridge=$bridgeName';
-        $lines[] = '    :log info "SKYmanager: WiFi interface imeongezwa kwenye bridge"';
-        $lines[] = '}';
-        $lines[] = '';
+            $L[] = '# ---- HATUA 3: WireGuard Peer (VPS)';
+            $L[] = ':if ([:len [/interface wireguard peers find comment="SKYmanager-VPS"]] = 0) do={';
+            $L[] = "    /interface wireguard peers add interface=\"wg-sky\" public-key=\"{$wgVpsPubKey}\" endpoint-address=\"{$wgEndpoint}\" allowed-address=\"{$apiSubnet}\" persistent-keepalive=25s comment=\"SKYmanager-VPS\"";
+            $L[] = '}';
+            $L[] = '';
 
-        // ── IP on bridge ─────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 6: Weka IP ya Gateway kwenye Bridge ───────────────────';
-        $lines[] = ':if ([:len [/ip address find interface=$bridgeName address=($hotspotIP . "/24")]] = 0) do={';
-        $lines[] = '    /ip address add address=($hotspotIP . "/24") interface=$bridgeName comment="SKYmanager Hotspot GW"';
-        $lines[] = '    :log info "SKYmanager: IP ya gateway imewekwa"';
-        $lines[] = '}';
-        $lines[] = '';
+            $L[] = '# ---- HATUA 4: WireGuard IP';
+            $L[] = ':if ([:len [/ip address find interface="wg-sky"]] = 0) do={';
+            $L[] = "    /ip address add address=\"{$wgAddress}\" interface=\"wg-sky\" comment=\"SKYmanager WG IP\"";
+            $L[] = '}';
+            $L[] = '';
+        } else {
+            $L[] = '# ---- HATUA 2-4: WireGuard imeachwa -- weka VPS config kwenye .env na uzalishe upya';
+            $L[] = '';
+        }
 
-        // ── DHCP pool & server ────────────────────────────────────────────
-        $lines[] = '# ── HATUA 7: Sanidi DHCP Server kwa Wateja wa WiFi ──────────────';
-        $lines[] = ':if ([:len [/ip pool find name="sky-pool"]] = 0) do={';
-        $lines[] = '    /ip pool add name="sky-pool" ranges=$dhcpPool';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip dhcp-server find interface=$bridgeName]] = 0) do={';
-        $lines[] = '    /ip dhcp-server add name="sky-dhcp" interface=$bridgeName \\';
-        $lines[] = '        address-pool="sky-pool" lease-time=1h disabled=no \\';
-        $lines[] = '        comment="SKYmanager DHCP"';
-        $lines[] = '    /ip dhcp-server network add address=$hotspotNet \\';
-        $lines[] = '        gateway=$hotspotIP dns-server=$hotspotIP \\';
-        $lines[] = '        comment="SKYmanager DHCP Network"';
-        $lines[] = '    :log info "SKYmanager: DHCP server imeundwa"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 5: Bridge ───────────────────────────────────────────────
+        $L[] = '# ---- HATUA 5: Bridge na WiFi Interface';
+        $L[] = ':if ([:len [/interface bridge find name=$bridgeName]] = 0) do={';
+        $L[] = '    /interface bridge add name=$bridgeName comment="SKYmanager Bridge"';
+        $L[] = '}';
+        $L[] = ':do {';
+        $L[] = '    :if ([:len [/interface bridge port find interface=$wifiIface bridge=$bridgeName]] = 0) do={';
+        $L[] = '        /interface bridge port add interface=$wifiIface bridge=$bridgeName';
+        $L[] = '    }';
+        $L[] = '} on-error={ :put "ONYO: Badilisha wifiIface kulingana na /interface print" }';
+        $L[] = '';
 
-        // ── DHCP Option 114 (RFC 7710 Captive Portal) ────────────────────
-        $lines[] = '# ── HATUA 8: DHCP Option 114 (Captive Portal API — RFC 7710) ────';
-        $lines[] = '#    Hii inaambia OS (Android 11+, Windows 11, iOS 14+) moja kwa';
-        $lines[] = '#    moja kuwa kuna captive portal, bila kuhitaji HTTP probe.';
-        $lines[] = ':if ([:len [/ip dhcp-server option find name="captive-portal"]] = 0) do={';
-        $lines[] = '    :if ($rosMajor >= 7) do={';
-        $lines[] = '        /ip dhcp-server option add name="captive-portal" code=114 \\';
-        $lines[] = '            value=("\'s\'" . $portalUrl) \\';
-        $lines[] = '            comment="SKYmanager Captive Portal RFC7710"';
-        $lines[] = '    } else={';
-        $lines[] = '        /ip dhcp-server option add name="captive-portal" code=114 \\';
-        $lines[] = '            value=("0s" . $portalUrl) \\';
-        $lines[] = '            comment="SKYmanager Captive Portal RFC7710"';
-        $lines[] = '    }';
-        $lines[] = '    :log info "SKYmanager: DHCP Option 114 imeongezwa"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip dhcp-server option sets find name="sky-opt-set"]] = 0) do={';
-        $lines[] = '    /ip dhcp-server option sets add name="sky-opt-set" options="captive-portal"';
-        $lines[] = '    /ip dhcp-server set [find name="sky-dhcp"] dhcp-option-set="sky-opt-set"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 6: IP on bridge ─────────────────────────────────────────
+        // Hardcode the full address/prefix -- avoids RouterOS string concat issues
+        $L[] = '# ---- HATUA 6: IP ya Gateway kwenye Bridge';
+        $L[] = ':if ([:len [/ip address find interface=$bridgeName]] = 0) do={';
+        $L[] = "    /ip address add address=\"{$hotspotGw}/24\" interface=\$bridgeName comment=\"SKYmanager Hotspot GW\"";
+        $L[] = '}';
+        $L[] = '';
 
-        // ── DNS ───────────────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 9: Sanidi DNS ─────────────────────────────────────────';
-        $lines[] = '/ip dns set servers="8.8.8.8,1.1.1.1" allow-remote-requests=yes';
-        $lines[] = '';
+        // ── HATUA 7: DHCP ─────────────────────────────────────────────────
+        $L[] = '# ---- HATUA 7: DHCP Server';
+        $L[] = ':if ([:len [/ip pool find name="sky-pool"]] = 0) do={';
+        $L[] = "    /ip pool add name=\"sky-pool\" ranges=\"{$dhcpPool}\"";
+        $L[] = '}';
+        $L[] = ':if ([:len [/ip dhcp-server find name="sky-dhcp"]] = 0) do={';
+        $L[] = '    /ip dhcp-server add name="sky-dhcp" interface=$bridgeName address-pool="sky-pool" lease-time=1h disabled=no comment="SKYmanager DHCP"';
+        $L[] = "    /ip dhcp-server network add address=\"{$hotspotNet}\" gateway=\"{$hotspotGw}\" dns-server=\"{$hotspotGw}\" comment=\"SKYmanager DHCP Network\"";
+        $L[] = '}';
+        $L[] = '';
 
-        // ── DNS Static (CPD Spoofing) ────────────────────────────────────
-        $lines[] = '# ── HATUA 10: DNS Static kwa CPD (Spoofing Probes) ──────────────';
-        $lines[] = '#    Android, iOS, Windows, Firefox zote zinatumia URLs maalum';
-        $lines[] = '#    kuangalia kama internet ipo. Tunazijibu na IP yetu ya hotspot';
-        $lines[] = '#    ili zifungue popup ya captive portal.';
+        // ── HATUA 8: DHCP Option 114 (RFC 7710) ──────────────────────────
+        // URL hardcoded at PHP generation time -- avoids RouterOS variable concat
+        // which fails with "Unknown data type!" when variable is empty.
+        $L[] = '# ---- HATUA 8: DHCP Option 114 (RFC 7710 -- CPD auto-popup)';
+        $L[] = ':if ([:len [/ip dhcp-server option find name="captive-portal"]] = 0) do={';
+        $L[] = "    /ip dhcp-server option add name=\"captive-portal\" code=114 value=\"'s'{$portalUrl}\" comment=\"SKYmanager RFC7710\"";
+        $L[] = '}';
+        $L[] = ':if ([:len [/ip dhcp-server option sets find name="sky-opt-set"]] = 0) do={';
+        $L[] = '    /ip dhcp-server option sets add name="sky-opt-set" options="captive-portal"';
+        $L[] = '    :if ([:len [/ip dhcp-server find name="sky-dhcp"]] > 0) do={';
+        $L[] = '        /ip dhcp-server set [find name="sky-dhcp"] dhcp-option-set="sky-opt-set"';
+        $L[] = '    }';
+        $L[] = '}';
+        $L[] = '';
 
-        $cpd_hosts = [
-            'connectivitycheck.gstatic.com' => 'Android CPD',
-            'connectivitycheck.android.com' => 'Android CPD',
-            'clients3.google.com' => 'Android CPD',
-            'clients1.google.com' => 'Android CPD',
-            'captive.apple.com' => 'iOS/macOS CPD',
-            'www.apple.com' => 'iOS/macOS CPD',
-            'appleiphoneactivation.apple.com' => 'iOS activation',
-            'www.msftconnecttest.com' => 'Windows CPD',
-            'www.msftncsi.com' => 'Windows NCSI',
-            'detectportal.firefox.com' => 'Firefox CPD',
-            'connectivity-check.ubuntu.com' => 'Ubuntu CPD',
-            'nmcheck.gnome.org' => 'GNOME CPD',
+        // ── HATUA 9: DNS ──────────────────────────────────────────────────
+        $L[] = '# ---- HATUA 9: DNS';
+        $L[] = '/ip dns set servers="8.8.8.8,1.1.1.1" allow-remote-requests=yes';
+        $L[] = '';
+
+        // ── HATUA 10: DNS Static (CPD Spoofing) ──────────────────────────
+        $L[] = '# ---- HATUA 10: DNS Static kwa CPD (Captive Portal Detection)';
+        $L[] = '# Android, iOS, Windows, Firefox zinatumia URLs hizi kupima internet.';
+        $L[] = '# Tunazijibu na IP ya hotspot ili zifungue popup ya captive portal.';
+
+        $cpdHosts = [
+            'connectivitycheck.gstatic.com',
+            'connectivitycheck.android.com',
+            'clients3.google.com',
+            'clients1.google.com',
+            'captive.apple.com',
+            'www.apple.com',
+            'appleiphoneactivation.apple.com',
+            'www.msftconnecttest.com',
+            'www.msftncsi.com',
+            'detectportal.firefox.com',
+            'connectivity-check.ubuntu.com',
+            'nmcheck.gnome.org',
         ];
 
-        foreach ($cpd_hosts as $host => $comment) {
-            $lines[] = ":if ([:len [/ip dns static find name=\"{$host}\"]] = 0) do={";
-            $lines[] = "    /ip dns static add name=\"{$host}\" address=\$hotspotIP \\";
-            $lines[] = "        comment=\"SKYmanager CPD — {$comment}\"";
-            $lines[] = '}';
+        foreach ($cpdHosts as $host) {
+            $L[] = ":if ([:len [/ip dns static find name=\"{$host}\"]] = 0) do={";
+            $L[] = "    /ip dns static add name=\"{$host}\" address=\$hotspotGw comment=\"SKYmanager CPD\"";
+            $L[] = '}';
         }
-        $lines[] = ':log info "SKYmanager: DNS static entries za CPD zimeongezwa"';
-        $lines[] = '';
+        $L[] = '';
 
-        // ── NAT — dual rule: hotspot clients + WireGuard subnet ────────────
-        $lines[] = '# ── HATUA 11: NAT (Masquerade — Wateja + WireGuard) ─────────────';
-        $lines[] = '# Rule 1: Wateja wa hotspot waweze kupata internet kupitia WAN.';
-        $lines[] = '# Rule 2: WireGuard traffic (VPN subnet) pia ipite kupitia WAN.';
-        $lines[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT Hotspot"]] = 0) do={';
-        $lines[] = '    /ip firewall nat add chain=srcnat src-address=$hotspotNet \\';
-        $lines[] = '        out-interface=$wanIface action=masquerade \\';
-        $lines[] = '        comment="SKY-NAT Hotspot"';
-        $lines[] = '    :put "  ✔ NAT ya wateja wa hotspot imeongezwa"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT WireGuard"]] = 0) do={';
-        $lines[] = '    /ip firewall nat add chain=srcnat src-address=$apiSubnet \\';
-        $lines[] = '        out-interface=$wanIface action=masquerade \\';
-        $lines[] = '        comment="SKY-NAT WireGuard"';
-        $lines[] = '    :put "  ✔ NAT ya WireGuard subnet imeongezwa"';
-        $lines[] = '}';
-        $lines[] = ':log info "SKYmanager: NAT rules zimeongezwa"';
-        $lines[] = '';
+        // ── HATUA 11: NAT ─────────────────────────────────────────────────
+        // Hardcode subnet values -- RouterOS variable expansion is unreliable
+        // in nat src-address when variables are set via script locals.
+        $L[] = '# ---- HATUA 11: NAT (Masquerade)';
+        $L[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT-Hotspot"]] = 0) do={';
+        $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$hotspotNet}\" out-interface=\$wanIface action=masquerade comment=\"SKY-NAT-Hotspot\"";
+        $L[] = '}';
+        if ($hasWg) {
+            $L[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT-WireGuard"]] = 0) do={';
+            $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$apiSubnet}\" out-interface=\$wanIface action=masquerade comment=\"SKY-NAT-WireGuard\"";
+            $L[] = '}';
+        }
+        $L[] = '';
 
-        // ── Hotspot ───────────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 12: Washa Hotspot kwenye Bridge Interface ─────────────';
-        $lines[] = ':if ([:len [/ip hotspot find interface=$bridgeName]] = 0) do={';
-        $lines[] = '    /ip hotspot add name="sky-hotspot" interface=$bridgeName \\';
-        $lines[] = '        address-pool="sky-pool" disabled=no \\';
-        $lines[] = '        comment="SKYmanager Hotspot"';
-        $lines[] = '    :log info "SKYmanager: Hotspot imewashwa"';
-        $lines[] = '} else={';
-        $lines[] = '    :log info "SKYmanager: Hotspot tayari ipo"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 12: Hotspot ─────────────────────────────────────────────
+        $L[] = '# ---- HATUA 12: Hotspot';
+        $L[] = ':if ([:len [/ip hotspot find interface=$bridgeName]] = 0) do={';
+        $L[] = '    /ip hotspot add name="sky-hotspot" interface=$bridgeName address-pool="sky-pool" disabled=no';
+        $L[] = '}';
+        $L[] = '';
 
-        // ── Upload login.html ─────────────────────────────────────────────
-        $lines[] = '# ── HATUA 13: Pakia login.html (CPD Redirect Page) ──────────────';
-        $lines[] = '#    File hii ndiyo inayomredirect mtumiaji kwenye portal.';
-        $lines[] = '#    MikroTik itaibadilisha $(mac), $(ip), $(link-orig-esc).';
-        $lines[] = ':do {';
-        $lines[] = '    /tool fetch url=$loginHtmlUrl dst-path="hotspot/login.html" \\';
-        $lines[] = '        keep-result=yes';
-        $lines[] = '    :log info "SKYmanager: login.html imepakiwa vizuri"';
-        $lines[] = '} on-error={';
-        $lines[] = '    :log warning "SKYmanager: Imeshindwa kupakua login.html — sanidi mwenyewe"';
-        $lines[] = '    :put "⚠️  login.html haikupakiwa. Angalia muunganiko wa internet."';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 13: Upload login.html ───────────────────────────────────
+        $L[] = '# ---- HATUA 13: Pakia login.html (redirect page ya CPD)';
+        $L[] = ':do {';
+        $L[] = "    /tool fetch url=\"{$loginHtmlUrl}\" dst-path=\"hotspot/login.html\" keep-result=yes";
+        $L[] = '    :put "login.html imepakiwa vizuri"';
+        $L[] = '} on-error={';
+        $L[] = '    :put "ONYO: login.html haikupakiwa -- angalia muunganiko wa internet"';
+        $L[] = '}';
+        $L[] = '';
 
-        // ── Hotspot profile ───────────────────────────────────────────────
-        $lines[] = '# ── HATUA 14: Sanidi Hotspot Profile (CPD + DNS name) ───────────';
-        $lines[] = ':if ($rosMajor >= 7) do={';
-        $lines[] = '    /ip hotspot profile set [find] \\';
-        $lines[] = '        html-directory="hotspot" \\';
-        $lines[] = '        dns-name=$portalDomain \\';
-        $lines[] = '        login-by="http-chap,http-pap,cookie" \\';
-        $lines[] = '        http-cookie-lifetime=30m';
-        $lines[] = '} else={';
-        $lines[] = '    /ip hotspot profile set [find] \\';
-        $lines[] = '        html-directory="flash/hotspot" \\';
-        $lines[] = '        dns-name=$portalDomain \\';
-        $lines[] = '        login-by="cookie,http-chap,http-pap"';
-        $lines[] = '}';
-        $lines[] = ':log info "SKYmanager: Hotspot profile imesanidiwa"';
-        $lines[] = '';
+        // ── HATUA 14: Hotspot profile ─────────────────────────────────────
+        // Portaldomein hardcoded -- avoids variable parsing ambiguity.
+        // Single-line commands used -- \ continuation is unreliable inside do={}.
+        $L[] = '# ---- HATUA 14: Hotspot Profile';
+        $L[] = ':if ($rosMajor >= 7) do={';
+        $L[] = "    /ip hotspot profile set [find] html-directory=\"hotspot\" login-by=\"http-chap,http-pap,cookie\" dns-name=\"{$portalDomain}\" http-cookie-lifetime=30m";
+        $L[] = '} else={';
+        $L[] = "    /ip hotspot profile set [find] html-directory=\"flash/hotspot\" login-by=\"cookie,http-chap,http-pap\" dns-name=\"{$portalDomain}\"";
+        $L[] = '}';
+        $L[] = '';
 
-        // ── Walled Garden ────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 15: Walled Garden (Portal + ClickPesa) ────────────────';
-        $lines[] = '#    Hizi ni sites ambazo wateja wanaweza kupata KABLA ya kulipa.';
-
-        $wg_entries = [
-            "*.{$portalDomain}" => 'SKYmanager Portal',
-            $portalDomain => 'SKYmanager Portal (bare)',
-            '*.clickpesa.com' => 'ClickPesa Payment',
-            'api.clickpesa.com' => 'ClickPesa API',
+        // ── HATUA 15: Walled Garden ───────────────────────────────────────
+        $L[] = '# ---- HATUA 15: Walled Garden (portal + malipo)';
+        $wgEntries = [
+            "*.{$portalDomain}",
+            $portalDomain,
+            '*.clickpesa.com',
+            'api.clickpesa.com',
         ];
         if ($vpsIp) {
-            $wg_entries[$vpsIp] = 'SKYmanager VPS';
+            $wgEntries[] = $vpsIp;
         }
-
-        foreach ($wg_entries as $host => $comment) {
-            $lines[] = ":if ([:len [/ip hotspot walled-garden find dst-host=\"{$host}\"]] = 0) do={";
-            $lines[] = "    /ip hotspot walled-garden add dst-host=\"{$host}\" \\";
-            $lines[] = "        action=allow comment=\"SKYmanager — {$comment}\"";
-            $lines[] = '}';
+        foreach ($wgEntries as $wgHost) {
+            $L[] = ":if ([:len [/ip hotspot walled-garden find dst-host=\"{$wgHost}\"]] = 0) do={";
+            $L[] = "    /ip hotspot walled-garden add dst-host=\"{$wgHost}\" action=allow comment=\"SKYmanager\"";
+            $L[] = '}';
         }
-        $lines[] = '/ip hotspot walled-garden ip add dst-address=0.0.0.0/0 protocol=tcp dst-port=443 action=allow comment="SKYmanager — HTTPS passthrough"';
-        $lines[] = ':log info "SKYmanager: Walled Garden imesanidiwa"';
-        $lines[] = '';
+        // Idempotent HTTPS passthrough
+        $L[] = ':if ([:len [/ip hotspot walled-garden ip find comment="SKY-WG-HTTPS"]] = 0) do={';
+        $L[] = '    /ip hotspot walled-garden ip add dst-address=0.0.0.0/0 protocol=tcp dst-port=443 action=allow comment="SKY-WG-HTTPS"';
+        $L[] = '}';
+        $L[] = '';
 
-        // ── WiFi SSID ─────────────────────────────────────────────────────
-        $lines[] = '# ── HATUA 16: Weka Jina la WiFi (SSID) ─────────────────────────';
-        $lines[] = ':do {';
-        $lines[] = '    /interface wireless set [find] ssid=$ssid disabled=no';
-        $lines[] = '    :put ("  ✔ SSID imewekwa: " . $ssid)';
-        $lines[] = '    :log info ("SKYmanager: SSID = " . $ssid)';
-        $lines[] = '} on-error={';
-        $lines[] = '    :put "  ↩ Wireless interface haikupatikana — imerukwa"';
-        $lines[] = '    :log warning "SKYmanager: Wireless interface haikupatikana"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 16: WiFi SSID ───────────────────────────────────────────
+        $L[] = '# ---- HATUA 16: WiFi SSID';
+        $L[] = ':do {';
+        $L[] = '    /interface wireless set [find] ssid=$ssid disabled=no';
+        $L[] = '    :put ("SSID: " . $ssid)';
+        $L[] = '} on-error={ :put "ONYO: Wireless interface haikupatikana -- imerukwa" }';
+        $L[] = '';
 
-        // ── API user with custom group (proper policy) ─────────────────────
-        $lines[] = '# ── HATUA 17: Tengeneza API User ya SKYmanager ──────────────────';
-        $lines[] = '# Tunatengeneza group ya pekee: read,write,policy,test,api,winbox';
-        $lines[] = '# Hii ni salama zaidi kuliko group=full.';
-        $lines[] = ':if ([:len [/user group find name="sky-managers"]] = 0) do={';
-        $lines[] = '    /user group add name="sky-managers" \\';
-        $lines[] = '        policy="read,write,policy,test,api,winbox" \\';
-        $lines[] = '        comment="SKYmanager API Group"';
-        $lines[] = '    :put "  ✔ API group imeundwa: sky-managers"';
-        $lines[] = '} else={';
-        $lines[] = '    :put "  ↩ API group tayari ipo — imerukwa"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/user find name=$apiUser]] = 0) do={';
-        $lines[] = '    /user add name=$apiUser password=$apiPassword \\';
-        $lines[] = '        group="sky-managers" \\';
-        $lines[] = '        comment="SKYmanager API User (usifute au kubadilisha!)"';
-        $lines[] = '    :put ("  ✔ API user imeundwa: " . $apiUser)';
-        $lines[] = '    :log info "SKYmanager: API user imeundwa"';
-        $lines[] = '} else={';
-        $lines[] = '    /user set [find name=$apiUser] password=$apiPassword group="sky-managers"';
-        $lines[] = '    :put "  ✔ API user password imesasishwa"';
-        $lines[] = '    :log info "SKYmanager: API user imesasishwa"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 17: API user ────────────────────────────────────────────
+        $L[] = '# ---- HATUA 17: API User ya SKYmanager';
+        $L[] = ':if ([:len [/user group find name="sky-managers"]] = 0) do={';
+        $L[] = '    /user group add name="sky-managers" policy="read,write,policy,test,api,winbox" comment="SKYmanager API Group"';
+        $L[] = '}';
+        $L[] = ':if ([:len [/user find name=$apiUser]] = 0) do={';
+        $L[] = '    /user add name=$apiUser password=$apiPassword group="sky-managers" comment="SKYmanager API"';
+        $L[] = '    :put ("API user imeundwa: " . $apiUser)';
+        $L[] = '} else={';
+        $L[] = '    /user set [find name=$apiUser] password=$apiPassword group="sky-managers"';
+        $L[] = '    :put "API user password imesasishwa"';
+        $L[] = '}';
+        $L[] = '';
 
-        // ── Remove default admin (safe idempotent check) ─────────────────
-        $lines[] = '# ── HATUA 18: Futa admin ya Default (Usalama) ───────────────────';
-        $lines[] = '# Hakikisha sky-api imefanikiwa kuundwa (HATUA 17) kabla ya hii.';
-        $lines[] = ':if ([:len [/user find name="admin"]] > 0) do={';
-        $lines[] = '    /user remove [find name="admin"]';
-        $lines[] = '    :put "  ✔ Admin ya default imefutwa (usalama)"';
-        $lines[] = '    :log info "SKYmanager: Default admin imefutwa"';
-        $lines[] = '} else={';
-        $lines[] = '    :put "  ↩ Admin ya default haipo — imerukwa"';
-        $lines[] = '}';
-        $lines[] = '';
+        // ── HATUA 18: Remove default admin ───────────────────────────────
+        // Only remove admin AFTER confirming sky-api user was created successfully.
+        $L[] = '# ---- HATUA 18: Futa admin ya default (usalama)';
+        $L[] = ':if ([:len [/user find name=$apiUser]] > 0) do={';
+        $L[] = '    :if ([:len [/user find name="admin"]] > 0) do={';
+        $L[] = '        /user remove [find name="admin"]';
+        $L[] = '        :put "Admin ya default imefutwa"';
+        $L[] = '    }';
+        $L[] = '}';
+        $L[] = '';
 
-        // ── Lock down services (safe wrappers for both v6 and v7) ─────────
-        $lines[] = '# ── HATUA 19: Zuia Huduma Zisizo Hitajika (API + Winbox tu) ─────';
-        $lines[] = '/ip service set api port=8728 disabled=no address=$apiSubnet';
-        $lines[] = '/ip service set winbox disabled=no';
-        $lines[] = '# :do {} on-error={} inazuia kosa kama service haipo kwenye toleo hilo';
-        $lines[] = ':do { /ip service set telnet disabled=yes } on-error={}';
-        $lines[] = ':do { /ip service set ftp disabled=yes } on-error={}';
-        $lines[] = ':do { /ip service set www disabled=yes } on-error={}';
-        $lines[] = ':do { /ip service set api-ssl disabled=yes } on-error={}';
-        $lines[] = ':put "  ✔ Services zimesanidiwa (API + Winbox tu)"';
-        $lines[] = '';
+        // ── HATUA 19: Lock down services ──────────────────────────────────
+        // Hardcode apiSubnet -- /ip service set address= does not expand locals.
+        $L[] = '# ---- HATUA 19: Zuia Huduma Zisizo Hitajika';
+        $L[] = ":do { /ip service set api port=8728 disabled=no address=\"{$apiSubnet}\" } on-error={}";
+        $L[] = ':do { /ip service set winbox disabled=no } on-error={}';
+        $L[] = ':do { /ip service set telnet disabled=yes } on-error={}';
+        $L[] = ':do { /ip service set ftp disabled=yes } on-error={}';
+        $L[] = ':do { /ip service set www disabled=yes } on-error={}';
+        $L[] = ':do { /ip service set api-ssl disabled=yes } on-error={}';
+        $L[] = '';
 
-        // ── Firewall: accept rules first, then block ─────────────────────
-        $lines[] = '# ── HATUA 20: Firewall (Kubali + Zuia — kwa mpangilio sahihi) ────';
-        $lines[] = '# MUHIMU: Accept rules lazima ziwe KABLA ya drop rules.';
-        $lines[] = '# 1. Kubali established/related (internet ifanye kazi vizuri)';
-        $lines[] = '# 2. Kubali WireGuard UDP port (VPN connection ya SKYmanager)';
-        $lines[] = '# 3. Kubali API kutoka VPN subnet tu (usalama)';
-        $lines[] = '# 4. Kubali traffic ya hotspot clients kuelekea internet';
-        $lines[] = '# 5. ZUIA API kutoka nje ya VPN (usalama mkubwa)';
-        $lines[] = ':if ([:len [/ip firewall filter find comment="SKY-FW Accept Established"]] = 0) do={';
-        $lines[] = '    /ip firewall filter add chain=forward \\';
-        $lines[] = '        connection-state=established,related action=accept \\';
-        $lines[] = '        comment="SKY-FW Accept Established" place-before=0';
-        $lines[] = '    :put "  ✔ Firewall: Accept established/related"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip firewall filter find comment="SKY-FW Accept WireGuard"]] = 0) do={';
-        $lines[] = '    /ip firewall filter add chain=input protocol=udp \\';
-        $lines[] = '        dst-port=$wgListenPort action=accept \\';
-        $lines[] = '        comment="SKY-FW Accept WireGuard"';
-        $lines[] = '    :put "  ✔ Firewall: Accept WireGuard UDP port"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip firewall filter find comment="SKY-FW Accept API from VPN"]] = 0) do={';
-        $lines[] = '    /ip firewall filter add chain=input protocol=tcp dst-port=8728 \\';
-        $lines[] = '        src-address=$apiSubnet action=accept \\';
-        $lines[] = '        comment="SKY-FW Accept API from VPN"';
-        $lines[] = '    :put "  ✔ Firewall: Accept API from WireGuard VPN"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip firewall filter find comment="SKY-FW Accept Hotspot"]] = 0) do={';
-        $lines[] = '    /ip firewall filter add chain=forward src-address=$hotspotNet \\';
-        $lines[] = '        action=accept comment="SKY-FW Accept Hotspot"';
-        $lines[] = '    :put "  ✔ Firewall: Accept hotspot clients"';
-        $lines[] = '}';
-        $lines[] = ':if ([:len [/ip firewall filter find comment="SKY-FW Block API WAN"]] = 0) do={';
-        $lines[] = '    /ip firewall filter add chain=input protocol=tcp dst-port=8728 \\';
-        $lines[] = '        src-address=!$apiSubnet action=drop \\';
-        $lines[] = '        comment="SKY-FW Block API WAN"';
-        $lines[] = '    :put "  ✔ Firewall: Block API from WAN"';
-        $lines[] = '}';
-        $lines[] = ':log info "SKYmanager: Firewall rules zimeongezwa"';
-        $lines[] = '';
+        // ── HATUA 20: Firewall ────────────────────────────────────────────
+        // All IP/port values hardcoded -- RouterOS variable expansion is unreliable
+        // in filter src-address. Negation (!subnet) must use literal value, not !$var.
+        $L[] = '# ---- HATUA 20: Firewall (accept kabla ya drop)';
+        $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-Established"]] = 0) do={';
+        $L[] = '    /ip firewall filter add chain=forward connection-state=established,related action=accept comment="SKY-FW-Established" place-before=0';
+        $L[] = '}';
+        $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-WireGuard"]] = 0) do={';
+        $L[] = "    /ip firewall filter add chain=input protocol=udp dst-port={$wgListenPort} action=accept comment=\"SKY-FW-WireGuard\"";
+        $L[] = '}';
+        if ($hasWg) {
+            $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-API-VPN"]] = 0) do={';
+            $L[] = "    /ip firewall filter add chain=input protocol=tcp dst-port=8728 src-address=\"{$apiSubnet}\" action=accept comment=\"SKY-FW-API-VPN\"";
+            $L[] = '}';
+            $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-API-Block"]] = 0) do={';
+            $L[] = "    /ip firewall filter add chain=input protocol=tcp dst-port=8728 src-address=!{$apiSubnet} action=drop comment=\"SKY-FW-API-Block\"";
+            $L[] = '}';
+        }
+        $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-Hotspot"]] = 0) do={';
+        $L[] = "    /ip firewall filter add chain=forward src-address=\"{$hotspotNet}\" action=accept comment=\"SKY-FW-Hotspot\"";
+        $L[] = '}';
+        $L[] = '';
 
-        // ── Final success message with WireGuard key + credentials ─────────
-        $lines[] = '# ── MWISHO: Ujumbe wa Mafanikio + Credentials ─────────────────';
-        $lines[] = '# Soma output hapa chini kwa makini — una taarifa muhimu.';
-        $lines[] = ':local wgPubKey [/interface wireguard get [find name="wg-sky"] public-key]';
-        $lines[] = '';
-        $lines[] = ':put ""';
-        $lines[] = ':put "================================================================"';
-        $lines[] = ':put "  ✅  SKYmanager imeunganishwa VIZURI! Hongera!"';
-        $lines[] = ':put "================================================================"';
-        $lines[] = ':put ""';
-        $lines[] = ':put "┌─ �  WireGuard Public Key ya Router Hii: ──────────────────"';
-        $lines[] = ':put $wgPubKey';
-        $lines[] = ':put "└───────────────────────────────────────────────────────────────"';
-        $lines[] = ':put ""';
-        $lines[] = ':put "Amri ya VPS (iendesha kwenye Linux VPS yako):"';
-        $lines[] = ':put ("  sudo wg set wg0 peer " . $wgPubKey . " allowed-ips " . $wgAddress . " persistent-keepalive 25")';
-        $lines[] = ':put ""';
-        $lines[] = ':put "┌─ 🔑  SKYmanager API Credentials: ────────────────────────────"';
-        $lines[] = ':put ("  API User    : " . $apiUser)';
-        $lines[] = ':put ("  API Password: " . $apiPassword)';
-        $lines[] = ':put "  API Port    : 8728"';
-        $lines[] = ':put ("  Router IP   : " . [/ip address get [find interface=\"wg-sky\"] address])';
-        $lines[] = ':put "└───────────────────────────────────────────────────────────────"';
-        $lines[] = ':put ""';
-        $lines[] = ':put "┌─ 🌐  Hatua Inayofuata: ───────────────────────────────────────"';
-        $lines[] = ':put "  1. Nakili Public Key hapo juu"';
-        $lines[] = ':put "  2. Endesha amri ya VPS hapo juu kwenye Linux VPS yako"';
-        $lines[] = ':put "  3. Rudi SKYmanager Dashboard → Routers"';
-        $lines[] = ':put "  4. Bonyeza \"Test Connection\" — utaona Online ✅"';
-        $lines[] = ':put "└───────────────────────────────────────────────────────────────"';
-        $lines[] = ':put ""';
-        $lines[] = ':put "================================================================"';
+        // ── Final success message ──────────────────────────────────────────
+        $L[] = '# ---- MWISHO: Mafanikio!';
+        if ($hasWg) {
+            $L[] = ':local wgPubKey [/interface wireguard get [find name="wg-sky"] public-key]';
+        } else {
+            $L[] = ':local wgPubKey "(WireGuard haijaendelezwa -- weka VPS config kwenye .env)"';
+        }
+        $L[] = ':put ""';
+        $L[] = ':put "================================================================"';
+        $L[] = ':put "   SKYmanager Setup IMEKAMILIKA! Hongera!"';
+        $L[] = ':put "================================================================"';
+        $L[] = ':put ""';
+        $L[] = ':put "WireGuard Public Key ya Router Hii:"';
+        $L[] = ':put $wgPubKey';
+        $L[] = ':put ""';
+        if ($hasWg) {
+            $L[] = ':put "Amri ya VPS (iendesha kwenye Linux VPS):"';
+            $L[] = ":put (\"  sudo wg set wg0 peer \" . \$wgPubKey . \" allowed-ips {$wgAddress} persistent-keepalive 25\")";
+            $L[] = ':put ""';
+        }
+        $L[] = ':put "================================================================"';
+        $L[] = ':put "   SKYmanager API Credentials"';
+        $L[] = ':put "================================================================"';
+        $L[] = ':put ("  Mtumiaji  : " . $apiUser)';
+        $L[] = ':put ("  Nenosiri  : " . $apiPassword)';
+        $L[] = ':put "  Bandari   : 8728"';
+        $L[] = ':put ""';
+        $L[] = ':put "Hatua Inayofuata:"';
+        $L[] = ':put "  1. Nakili Public Key hapo juu"';
+        if ($hasWg) {
+            $L[] = ':put "  2. Endesha amri ya VPS hapo juu kwenye Linux VPS"';
+        }
+        $L[] = ':put "  3. Rudi SKYmanager Dashboard > Routers > Test Connection"';
+        $L[] = ':put "================================================================"';
 
-        $script = implode("\n", $lines);
+        $script = implode("\n", $L);
 
         Log::info('SKYmanager: Full setup script generated', [
             'router' => $router->name,
