@@ -106,6 +106,12 @@ class MyRouters extends Component
         $this->dispatch('notify', message: __('Router renamed successfully.'), type: 'success');
     }
 
+    public function closeModal(): void
+    {
+        $this->showScriptModal = false;
+        $this->generatedScript = '';
+    }
+
     public function markScriptPasted(): void
     {
         $this->showScriptModal = false;
