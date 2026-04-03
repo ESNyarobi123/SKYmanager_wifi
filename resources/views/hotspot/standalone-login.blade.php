@@ -579,6 +579,11 @@ function submitPayment() {
 
     if (data.error) { alert(data.error); return; }
 
+    if (!data.reference) {
+      alert('Payment initiation failed — no reference returned. Please try again.');
+      return;
+    }
+
     currentRef = data.reference;
     showSection('sec-paying');
     startPolling(currentRef);
@@ -592,6 +597,7 @@ function submitPayment() {
 
 // ── Status polling ────────────────────────────────────────────────────────────
 function startPolling(reference) {
+  if (!reference || reference === 'undefined') { return; }
   stopPolling();
   var attempts = 0;
   var maxAttempts = 60; // 3 min at 3 s intervals
@@ -711,8 +717,12 @@ function jsonHeaders() {
 }
 
 function okJson(r) {
-  if (!r.ok && r.status >= 500) { throw new Error('Server error ' + r.status); }
-  return r.json();
+  return r.json().then(function (body) {
+    if (!r.ok) {
+      throw new Error(body.error || body.message || ('Request failed (' + r.status + ')'));
+    }
+    return body;
+  });
 }
 
 function esc(str) {
