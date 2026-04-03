@@ -3,7 +3,9 @@
 namespace App\Livewire\Customer;
 
 use App\Models\CustomerBillingPlan;
+use App\Models\Router;
 use App\Models\User;
+use Illuminate\Support\Facades\URL;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
@@ -52,6 +54,11 @@ class MyPlans extends Component
     // ── Portal URL state ─────────────────────────────────────────────────────
     public bool $portalUrlCopied = false;
 
+    // ── Download / Preview modal state ───────────────────────────────────────
+    public bool $showDownloadModal = false;
+
+    public bool $showPreviewModal = false;
+
     // ── Computed ─────────────────────────────────────────────────────────────
 
     #[Computed]
@@ -80,6 +87,14 @@ class MyPlans extends Component
         }
 
         return $this->customer->billingPlans()->find($this->editingPlanId);
+    }
+
+    #[Computed]
+    public function customerRouters()
+    {
+        return Router::where('user_id', $this->customer->id)
+            ->orderBy('name')
+            ->get(['id', 'name', 'hotspot_ssid']);
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
@@ -202,6 +217,101 @@ class MyPlans extends Component
         unset($this->customer, $this->portalUrl);
         $this->portalUrlCopied = false;
         $this->dispatch('notify', message: __('New portal URL generated.'), type: 'success');
+    }
+
+    /**
+     * Open the "Generate Standalone Login.html" download modal.
+     * If the customer has exactly one router, redirect directly to the download.
+     * If they have multiple, show the router-selection modal.
+     */
+    public function openDownloadModal(): void
+    {
+        $routers = $this->customerRouters;
+
+        if ($routers->isEmpty()) {
+            $this->dispatch('notify', message: __('You have no routers yet. Claim a router first.'), type: 'warning');
+
+            return;
+        }
+
+        if ($routers->count() === 1) {
+            $this->downloadForRouter($routers->first()->id);
+
+            return;
+        }
+
+        $this->showDownloadModal = true;
+    }
+
+    /**
+     * Generate a signed download URL (valid 15 min) and redirect to it.
+     * Signed URL prevents link sharing and adds a time-based expiry.
+     */
+    public function downloadForRouter(string $routerId): void
+    {
+        $router = $this->customerRouters->firstWhere('id', $routerId);
+
+        if (! $router) {
+            $this->dispatch('notify', message: __('Router not found.'), type: 'error');
+
+            return;
+        }
+
+        $url = URL::temporarySignedRoute(
+            'customer.plans.download-login-html',
+            now()->addMinutes(15),
+            ['routerId' => $routerId]
+        );
+
+        $this->showDownloadModal = false;
+        $this->redirect($url);
+    }
+
+    /**
+     * Open the "Preview in Browser" modal for router selection.
+     * If the customer has exactly one router, open the preview directly.
+     */
+    public function openPreviewModal(): void
+    {
+        $routers = $this->customerRouters;
+
+        if ($routers->isEmpty()) {
+            $this->dispatch('notify', message: __('You have no routers yet. Claim a router first.'), type: 'warning');
+
+            return;
+        }
+
+        if ($routers->count() === 1) {
+            $this->previewForRouter($routers->first()->id);
+
+            return;
+        }
+
+        $this->showPreviewModal = true;
+    }
+
+    /**
+     * Generate a signed preview URL (valid 30 min) and dispatch a browser event
+     * so Alpine.js opens it in a new tab — Livewire cannot open new tabs directly.
+     */
+    public function previewForRouter(string $routerId): void
+    {
+        $router = $this->customerRouters->firstWhere('id', $routerId);
+
+        if (! $router) {
+            $this->dispatch('notify', message: __('Router not found.'), type: 'error');
+
+            return;
+        }
+
+        $url = URL::temporarySignedRoute(
+            'customer.plans.preview-login-html',
+            now()->addMinutes(15),
+            ['routerId' => $routerId]
+        );
+
+        $this->showPreviewModal = false;
+        $this->dispatch('open-preview-url', url: $url);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

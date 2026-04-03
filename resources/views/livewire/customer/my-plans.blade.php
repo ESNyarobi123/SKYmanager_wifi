@@ -8,15 +8,55 @@
                 {{ __('Create and manage plans shown on your captive portal. Customers see only your plans.') }}
             </p>
         </div>
-        <div class="flex items-center gap-2 shrink-0">
+        <div class="flex items-center gap-2 shrink-0 flex-wrap">
             <flux:button size="sm" variant="ghost" icon="globe-alt" wire:click="$set('showPortalModal', true)">
                 {{ __('My Portal URL') }}
+            </flux:button>
+            <flux:button size="sm" variant="ghost" icon="eye" wire:click="openPreviewModal" wire:loading.attr="disabled">
+                {{ __('Preview') }}
+            </flux:button>
+            <flux:button size="sm" variant="ghost" icon="arrow-down-tray" wire:click="openDownloadModal">
+                {{ __('Generate Login.html') }}
             </flux:button>
             <flux:button size="sm" variant="primary" icon="plus" wire:click="openCreateModal">
                 {{ __('Add Plan') }}
             </flux:button>
         </div>
     </div>
+
+    {{-- ── Deploy Banner ──────────────────────────────────────────────────── --}}
+    @if(!$this->plans->isEmpty())
+    <div class="mb-6 rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-600 to-purple-600 dark:border-indigo-700 px-5 py-5 shadow-md">
+        <div class="flex flex-col sm:flex-row sm:items-center gap-4">
+            <div class="flex items-center gap-3 flex-1 min-w-0">
+                <div class="inline-flex size-12 shrink-0 items-center justify-center rounded-2xl bg-white/20 shadow-inner">
+                    <x-lucide name="wifi" class="size-6 text-white"/>
+                </div>
+                <div class="min-w-0">
+                    <p class="text-base font-bold text-white leading-tight">{{ __('Ready to deploy your hotspot?') }}</p>
+                    <p class="text-xs text-indigo-200 mt-0.5 leading-relaxed">{{ __('Your plans and branding are embedded — upload directly to MikroTik.') }}</p>
+                    <p class="text-xs text-indigo-300 mt-1">{{ __('Links expire in 15 minutes for security.') }}</p>
+                </div>
+            </div>
+            <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                <div class="flex flex-col items-center gap-0.5">
+                    <flux:button size="sm" icon="eye" wire:click="openPreviewModal" wire:loading.attr="disabled"
+                        class="w-full sm:w-auto bg-white/15 hover:bg-white/25 border border-white/30 text-white font-semibold">
+                        {{ __('Preview') }}
+                    </flux:button>
+                    <span class="text-xs text-indigo-300">{{ __('Opens in new tab') }}</span>
+                </div>
+                <div class="flex flex-col items-center gap-0.5">
+                    <flux:button size="sm" icon="arrow-down-tray" wire:click="openDownloadModal"
+                        class="w-full sm:w-auto bg-white text-indigo-700 hover:bg-indigo-50 border-0 font-bold shadow">
+                        {{ __('Generate Login.html') }}
+                    </flux:button>
+                    <span class="text-xs text-indigo-300">{{ __('Download file') }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    @endif
 
     {{-- ── Portal URL Banner (if subdomain already set) ───────────────────── --}}
     @if($this->customer->portal_subdomain)
@@ -226,6 +266,80 @@
         </div>
     </flux:modal>
 
+    {{-- ══ PREVIEW IN BROWSER MODAL ══ --}}
+    <flux:modal wire:model="showPreviewModal" class="w-full max-w-lg">
+        <div class="mb-4">
+            <flux:heading>{{ __('Preview Login Page') }}</flux:heading>
+            <flux:subheading>{{ __('Select a router to preview its login page in a new browser tab. The preview link is valid for 30 minutes.') }}</flux:subheading>
+        </div>
+
+        <div class="space-y-2">
+            @foreach($this->customerRouters as $router)
+            <div class="flex items-center justify-between rounded-xl border border-gray-200 dark:border-neutral-700 px-4 py-3 hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-colors">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-neutral-800">
+                        <x-lucide name="wifi" class="size-4 text-gray-500 dark:text-neutral-400"/>
+                    </div>
+                    <div class="min-w-0">
+                        <p class="text-sm font-semibold text-gray-800 dark:text-neutral-200 truncate">{{ $router->hotspot_ssid ?: $router->name }}</p>
+                        @if($router->hotspot_ssid && $router->name !== $router->hotspot_ssid)
+                        <p class="text-xs text-gray-400 dark:text-neutral-500 truncate">{{ $router->name }}</p>
+                        @endif
+                    </div>
+                </div>
+                <flux:button size="sm" variant="ghost" wire:click="previewForRouter('{{ $router->id }}')"
+                    icon="arrow-top-right-on-square" wire:loading.attr="disabled">
+                    {{ __('Open Preview') }}
+                </flux:button>
+            </div>
+            @endforeach
+        </div>
+
+        <div class="flex justify-end mt-4">
+            <flux:button wire:click="$set('showPreviewModal', false)" variant="ghost">{{ __('Close') }}</flux:button>
+        </div>
+    </flux:modal>
+
+    {{-- ══ GENERATE STANDALONE LOGIN.HTML MODAL ══ --}}
+    <flux:modal wire:model="showDownloadModal" class="w-full max-w-lg">
+        <div class="mb-4">
+            <flux:heading>{{ __('Generate Standalone Login.html') }}</flux:heading>
+            <flux:subheading>{{ __('Select which router to generate the file for. Your plans and API settings will be embedded.') }}</flux:subheading>
+        </div>
+
+        <div class="space-y-2">
+            @foreach($this->customerRouters as $router)
+            <div class="flex items-center justify-between rounded-xl border border-gray-200 dark:border-neutral-700 px-4 py-3 hover:border-indigo-300 dark:hover:border-indigo-700 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-colors">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-neutral-800">
+                        <x-lucide name="wifi" class="size-4 text-gray-500 dark:text-neutral-400"/>
+                    </div>
+                    <div class="min-w-0">
+                        <p class="text-sm font-semibold text-gray-800 dark:text-neutral-200 truncate">{{ $router->hotspot_ssid ?: $router->name }}</p>
+                        @if($router->hotspot_ssid && $router->name !== $router->hotspot_ssid)
+                        <p class="text-xs text-gray-400 dark:text-neutral-500 truncate">{{ $router->name }}</p>
+                        @endif
+                    </div>
+                </div>
+                <flux:button size="sm" variant="ghost" wire:click="downloadForRouter('{{ $router->id }}')"
+                    icon="arrow-down-tray" wire:loading.attr="disabled">
+                    {{ __('Download') }}
+                </flux:button>
+            </div>
+            @endforeach
+        </div>
+
+        <div class="mt-5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 px-4 py-3">
+            <p class="text-xs font-medium text-amber-700 dark:text-amber-400">
+                {{ __('After downloading: rename to login.html and upload it to your MikroTik via the Files section, or run the MikroTik Setup Script which uploads it automatically.') }}
+            </p>
+        </div>
+
+        <div class="flex justify-end mt-4">
+            <flux:button wire:click="$set('showDownloadModal', false)" variant="ghost">{{ __('Close') }}</flux:button>
+        </div>
+    </flux:modal>
+
     {{-- ══ PORTAL URL MODAL ══ --}}
     <flux:modal wire:model="showPortalModal" class="w-full max-w-lg">
         <div class="mb-4">
@@ -282,5 +396,13 @@
             </flux:button>
         </div>
     </flux:modal>
+
+    @script
+    <script>
+        $wire.on('open-preview-url', ({ url }) => {
+            window.open(url, '_blank');
+        });
+    </script>
+    @endscript
 
 </div>

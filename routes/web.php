@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Customer\AuthController as CustomerAuthController;
 use App\Http\Controllers\Customer\InvoiceController as CustomerInvoiceController;
+use App\Http\Controllers\Customer\PortalHtmlController;
 use App\Http\Controllers\CustomerPortalController;
 use App\Http\Controllers\HotspotController;
 use App\Http\Controllers\SpeedTestController;
@@ -9,6 +10,9 @@ use App\Livewire\WelcomePage;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', WelcomePage::class)->name('home');
+
+// ── Laravel Boost dev-tool: only accepts POST; redirect GET gracefully ────────
+Route::get('/_boost/browser-logs', fn () => redirect('/'))->name('boost.browser-logs.get');
 
 // ── Admin routes (existing, untouched) ───────────────────────────────────────
 Route::middleware(['auth', 'verified'])->group(function () {
@@ -53,6 +57,10 @@ Route::prefix('customer')->name('customer.')->middleware(['auth', 'role:customer
     Route::view('referral', 'customer.referral')->name('referral');
     Route::view('payment-settings', 'customer.payment-settings')->name('payment-settings');
     Route::view('plans', 'customer.plans')->name('plans');
+    Route::get('plans/download-login-html/{routerId}', [PortalHtmlController::class, 'download'])
+        ->name('plans.download-login-html');
+    Route::get('plans/preview-login-html/{routerId}', [PortalHtmlController::class, 'preview'])
+        ->name('plans.preview-login-html');
 });
 
 // ── Public / portal routes ─────────────────────────────────────────────────────

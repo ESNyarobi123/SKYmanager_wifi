@@ -402,6 +402,117 @@ class MikrotikApiService
     }
 
     /**
+     * Authorize a hotspot client by MAC address after successful payment.
+     *
+     * Adds a /ip hotspot user entry with mac-address binding so MikroTik
+     * auto-logs the device in without a password challenge.
+     * Called from LocalPortalController after ClickPesa confirms payment.
+     *
+     * @throws Exception
+     */
+    public function authorizeHotspotMac(
+        string $mac,
+        string $profileName,
+        int $durationMinutes,
+        ?int $dataMb = null,
+        ?string $rateLimit = null
+    ): void {
+        $this->ensureConnected();
+
+        $mac = strtoupper($mac);
+
+        $existing = $this->sendCommand([
+            '/ip/hotspot/user/print',
+            '?mac-address='.$mac,
+        ]);
+
+        $limitUptime = $durationMinutes > 0 ? $durationMinutes.'m' : '0s';
+        $limitBytes = $dataMb ? (string) ($dataMb * 1048576) : '';
+
+        $params = [
+            '=name='.$mac,
+            '=mac-address='.$mac,
+            '=profile='.$profileName,
+            '=limit-uptime='.$limitUptime,
+            '=comment=SKYmanager auto-auth',
+        ];
+
+        if ($limitBytes) {
+            $params[] = '=limit-bytes-total='.$limitBytes;
+        }
+
+        if (! empty($existing) && isset($existing[0]['.id'])) {
+            array_unshift($params, '=.id='.$existing[0]['.id']);
+            $this->sendCommand(array_merge(['/ip/hotspot/user/set'], $params));
+        } else {
+            $this->sendCommand(array_merge(['/ip/hotspot/user/add'], $params));
+        }
+
+        $this->ensureHotspotProfile($profileName, $rateLimit);
+    }
+
+    /**
+     * Ensure a hotspot user profile exists with the correct rate limits.
+     * Creates or updates the profile named after the billing plan.
+     * $rateLimit: MikroTik "Uk/Dk" string, e.g. "512k/2048k". Null = unlimited.
+     *
+     * @throws Exception
+     */
+    public function ensureHotspotProfile(string $name, ?string $rateLimit = null): void
+    {
+        $this->ensureConnected();
+
+        $existing = $this->sendCommand([
+            '/ip/hotspot/user/profile/print',
+            '?name='.$name,
+        ]);
+
+        $params = [
+            '=name='.$name,
+            '=shared-users=1',
+        ];
+
+        if ($rateLimit && $rateLimit !== '0/0') {
+            $params[] = '=rate-limit='.$rateLimit;
+        }
+
+        if (! empty($existing) && isset($existing[0]['.id'])) {
+            array_unshift($params, '=.id='.$existing[0]['.id']);
+            $this->sendCommand(array_merge(['/ip/hotspot/user/profile/set'], $params));
+        } else {
+            $this->sendCommand(array_merge(['/ip/hotspot/user/profile/add'], $params));
+        }
+    }
+
+    /**
+     * Connect to a router using its ZTP sky-api credentials (wg_address + ztp_api_password).
+     * Falls back to the regular api_username/api_password if ZTP credentials are missing.
+     *
+     * @throws Exception
+     */
+    public function connectZtp(Router $router): static
+    {
+        $ip = $router->wg_address
+            ? explode('/', $router->wg_address)[0]
+            : $router->ip_address;
+
+        $username = 'sky-api';
+        $password = $router->ztp_api_password ?: $router->api_password;
+
+        $this->socket = @fsockopen($ip, $router->api_port ?: 8728, $errno, $errstr, 5);
+
+        if (! $this->socket) {
+            throw new Exception("Cannot reach router [{$router->name}] at {$ip}: {$errstr} ({$errno})");
+        }
+
+        stream_set_timeout($this->socket, 5);
+        $this->login($username, $password);
+        $this->isConnected = true;
+
+        return $this;
+    }
+
+    /**
      * Add or update a hotspot user entry (MAC-based).
      *
      * @throws Exception
@@ -888,9 +999,11 @@ class MikrotikApiService
         $L[] = '';
 
         // ── HATUA 13: Upload login.html ───────────────────────────────────
-        $L[] = '# ---- HATUA 13: Pakia login.html (redirect page ya CPD)';
+        // URL includes router_id so the local page fetches THIS router's plans.
+        $loginHtmlWithId = $loginHtmlUrl.'?router_id='.urlencode($router->id);
+        $L[] = '# ---- HATUA 13: Pakia login.html (local captive portal page)';
         $L[] = ':do {';
-        $L[] = "    /tool fetch url=\"{$loginHtmlUrl}\" dst-path=\"hotspot/login.html\" keep-result=yes";
+        $L[] = "    /tool fetch url=\"{$loginHtmlWithId}\" dst-path=\"hotspot/login.html\" keep-result=yes";
         $L[] = '    :put "login.html imepakiwa vizuri"';
         $L[] = '} on-error={';
         $L[] = '    :put "ONYO: login.html haikupakiwa -- angalia muunganiko wa internet"';
@@ -898,17 +1011,23 @@ class MikrotikApiService
         $L[] = '';
 
         // ── HATUA 14: Hotspot profile ─────────────────────────────────────
-        $L[] = '# ---- HATUA 14: Hotspot Profile';
+        // dns-name = hotspot gateway IP (local) so the portal opens instantly
+        // without needing VPS DNS resolution.
+        // login-by includes 'mac' for MAC-binding auto-login after payment.
+        $L[] = '# ---- HATUA 14: Hotspot Profile (local portal mode)';
         $L[] = ':if ($rosMajor >= 7) do={';
-        $L[] = "    /ip hotspot profile set [find] html-directory=\"hotspot\" login-by=\"http-chap,http-pap,cookie\" dns-name=\"{$portalDomain}\" http-cookie-lifetime=30m";
+        $L[] = "    /ip hotspot profile set [find] html-directory=\"hotspot\" login-by=\"mac,http-chap,http-pap,cookie\" dns-name=\"{$hotspotGw}\" http-cookie-lifetime=1d";
         $L[] = '} else={';
-        $L[] = "    /ip hotspot profile set [find] html-directory=\"flash/hotspot\" login-by=\"cookie,http-chap,http-pap\" dns-name=\"{$portalDomain}\"";
+        $L[] = "    /ip hotspot profile set [find] html-directory=\"flash/hotspot\" login-by=\"mac,cookie,http-chap,http-pap\" dns-name=\"{$hotspotGw}\"";
         $L[] = '}';
         $L[] = '';
 
         // ── HATUA 15: Walled Garden ───────────────────────────────────────
-        $L[] = '# ---- HATUA 15: Walled Garden (portal + malipo)';
-        $wgEntries = ["*.{$portalDomain}", $portalDomain, '*.clickpesa.com', 'api.clickpesa.com'];
+        // Allow VPS domain (for API calls from local portal) + ClickPesa.
+        // No CDN domains needed — portal JS is self-contained.
+        $vpsHost = parse_url(config('app.url'), PHP_URL_HOST) ?: $portalDomain;
+        $L[] = '# ---- HATUA 15: Walled Garden (VPS API + malipo)';
+        $wgEntries = ["*.{$vpsHost}", $vpsHost, '*.clickpesa.com', 'api.clickpesa.com'];
         if ($vpsIp) {
             $wgEntries[] = $vpsIp;
         }
