@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Router;
 use App\Models\User;
+use App\Support\WireguardProvisioning;
 use Exception;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -801,6 +802,95 @@ class MikrotikApiService
     }
 
     /**
+     * True when the wg-sky WireGuard interface reports running (RouterOS 7+).
+     *
+     * @throws Exception
+     */
+    public function checkWireguardSkyRunning(): bool
+    {
+        $this->ensureConnected();
+
+        $rows = $this->sendCommand([
+            '/interface/wireguard/print',
+            '?name=wg-sky',
+        ]);
+        $row = $rows[0] ?? [];
+
+        return isset($row['running']) && $row['running'] === 'true';
+    }
+
+    /**
+     * Read SKYmanager-VPS peer handshake while an API session is already open.
+     *
+     * @return array{handshake_at: ?Carbon, raw: array<string, string>}
+     *
+     * @throws Exception
+     */
+    public function readWireguardPeerHandshakeAfterConnect(): array
+    {
+        $this->ensureConnected();
+
+        $rows = $this->sendCommand([
+            '/interface/wireguard/peers/print',
+            '?comment=SKYmanager-VPS',
+        ]);
+        $row = $rows[0] ?? [];
+        $handshake = null;
+        if (isset($row['last-handshake'])) {
+            $ts = (int) $row['last-handshake'];
+            if ($ts > 0) {
+                $handshake = Carbon::createFromTimestamp($ts);
+            }
+        }
+
+        return ['handshake_at' => $handshake, 'raw' => $row];
+    }
+
+    /**
+     * Tunnel probe for persistence during a single ZTP API session.
+     *
+     * @return array{tunnel_up: bool, handshake_at: ?Carbon}
+     *
+     * @throws Exception
+     */
+    public function probeTunnelUpWhileConnected(Router $router): array
+    {
+        if (($router->preferred_vpn_mode ?? '') === 'none') {
+            return ['tunnel_up' => true, 'handshake_at' => null];
+        }
+
+        $useWgSection = WireguardProvisioning::shouldGenerateWireguardSection($router);
+
+        if ($useWgSection) {
+            $handshake = null;
+            try {
+                $handshake = $this->readWireguardPeerHandshakeAfterConnect()['handshake_at'];
+            } catch (\Throwable) {
+            }
+
+            $running = false;
+            try {
+                $running = $this->checkWireguardSkyRunning();
+            } catch (\Throwable) {
+            }
+
+            $recent = $handshake && $handshake->gt(now()->subMinutes(10));
+            $staleButRunning = $running && $handshake && $handshake->gt(now()->subHours(24));
+            $tunnelUp = $recent || $staleButRunning;
+
+            return ['tunnel_up' => $tunnelUp, 'handshake_at' => $handshake];
+        }
+
+        $tunnelUp = false;
+        try {
+            $tunnelUp = $this->checkVpnStatus();
+        } catch (\Throwable) {
+        }
+
+        return ['tunnel_up' => $tunnelUp, 'handshake_at' => null];
+    }
+
+    /**
      * Generate a comprehensive, one-click full MikroTik setup script.
      *
      * The returned string is a complete RouterOS CLI script the customer pastes
@@ -846,12 +936,23 @@ class MikrotikApiService
         $portalUrl = $router->user ? $router->user->portalUrl() : url('/portal');
         $portalDomain = config('services.ztp.portal_domain', 'micro.spotbox.online');
         $vpsIp = config('services.ztp.vps_ip', '');
-        $apiSubnet = config('services.wireguard.api_subnet', '10.10.0.0/24');
-        $wgEndpoint = config('services.wireguard.vps_endpoint', '');
-        $wgVpsPubKey = config('services.wireguard.vps_public_key', '');
-        $wgListenPort = (int) config('services.wireguard.listen_port', 51820);
+        $apiSubnet = (string) config('services.wireguard.api_subnet', '10.10.0.0/24');
+        $wgEndpoint = trim((string) config('services.wireguard.vps_endpoint', ''));
+        $wgVpsPubKey = trim((string) config('services.wireguard.vps_public_key', ''));
+        $wgListenPort = WireguardProvisioning::listenPort();
+        $vpsWgIface = WireguardProvisioning::vpsInterfaceName();
 
-        $wgAddress = $router->wg_address ?: '10.10.0.2/32';
+        $hasWg = WireguardProvisioning::shouldGenerateWireguardSection($router);
+        $wgHardFail = WireguardProvisioning::wireguardHardRequiredButIncomplete($router);
+
+        $wgAddress = '';
+        if ($hasWg) {
+            $wgAddress = trim((string) $router->wg_address);
+            if ($wgAddress !== '' && ! str_contains($wgAddress, '/')) {
+                $wgAddress .= '/32';
+            }
+        }
+
         $hotspotIface = $router->hotspot_interface ?: 'bridge';
         $hotspotSsid = str_replace('"', '', $router->hotspot_ssid ?: 'PEACE');
         $hotspotGw = $router->hotspot_gateway ?: '192.168.88.1';
@@ -864,34 +965,39 @@ class MikrotikApiService
 
         $scriptWarnings = [];
         if (! $router->wifi_interface) {
-            $scriptWarnings[] = ['code' => 'assumed_wifi', 'message' => 'WiFi interface not set — using '.$wifiIf.' (set in Advanced on claim or edit).'];
+            $scriptWarnings[] = ['code' => 'assumed_wifi', 'message' => 'WiFi interface not set — defaulting to '.$wifiIf.' for bridge port. Set WiFi interface in Advanced if this is wrong (/interface print).'];
         }
         if (! $router->wan_interface) {
-            $scriptWarnings[] = ['code' => 'assumed_wan', 'message' => 'WAN interface not set — using '.$wanIf.' for masquerade.'];
+            $scriptWarnings[] = ['code' => 'assumed_wan', 'message' => 'WAN interface not set — defaulting to '.$wanIf.' for masquerade/NAT. Set WAN interface in Advanced if uplink uses another port.'];
+        }
+        if (! $router->hotspot_interface) {
+            $scriptWarnings[] = ['code' => 'assumed_bridge', 'message' => 'Hotspot/bridge name not set — using '.$hotspotIface.'. Override in Advanced if your LAN bridge has another name.'];
         }
         if ($router->use_default_network_settings ?? true) {
-            $scriptWarnings[] = ['code' => 'default_lan', 'message' => 'Using template LAN '.$hotspotNet.' / gateway '.$hotspotGw.' — confirm or override in Advanced.'];
+            $scriptWarnings[] = ['code' => 'default_lan', 'message' => 'Using default LAN template gateway '.$hotspotGw.' and network '.$hotspotNet.' — confirm with /ip address print or override in Advanced.'];
         }
 
-        $vpnMode = $router->preferred_vpn_mode ?? 'wireguard';
-        $envWgOk = $wgEndpoint !== '' && $wgVpsPubKey !== '';
-        $clientWgOk = ! str_contains($wgAddress, 'X');
-
-        $hasWg = match ($vpnMode) {
-            'none' => false,
-            'auto' => $envWgOk && $clientWgOk,
-            default => $envWgOk && $clientWgOk,
-        };
-
-        $wgHardFail = ($vpnMode === 'wireguard') && ! ($envWgOk && $clientWgOk);
         if ($wgHardFail) {
             $scriptWarnings[] = [
                 'code' => 'wg_required_missing',
-                'message' => 'ERROR: WireGuard is required for this router but WG_VPS_ENDPOINT / WG_VPS_PUBLIC_KEY or wg_address is incomplete. Fix .env or assign wg_address before deployment.',
+                'message' => WireguardProvisioning::preciseWireguardWarningMessage($router),
             ];
         }
-        if ($vpnMode === 'auto' && ! $envWgOk) {
-            $scriptWarnings[] = ['code' => 'wg_skipped_auto', 'message' => 'WireGuard env incomplete — script runs without VPN (auto mode).'];
+
+        if (($router->preferred_vpn_mode ?? '') === 'auto' && ! WireguardProvisioning::isServerConfigComplete()) {
+            $scriptWarnings[] = [
+                'code' => 'wg_skipped_auto',
+                'message' => 'WireGuard server env incomplete — script runs without VPN (auto mode). Missing: '.implode(', ', WireguardProvisioning::missingServerEnvComponents()).'.',
+            ];
+        }
+
+        if (($router->preferred_vpn_mode ?? '') === 'auto'
+            && WireguardProvisioning::isServerConfigComplete()
+            && ! WireguardProvisioning::isRouterWgAddressUsable($router->wg_address)) {
+            $scriptWarnings[] = [
+                'code' => 'wg_skipped_auto_no_ip',
+                'message' => 'Auto mode: WG server env is OK but router wg_address is not set — script runs without VPN until you set a WireGuard tunnel IP (Advanced on claim).',
+            ];
         }
 
         // DHCP Option 114: hex-encode the URL so RouterOS never sees the 's' type
@@ -924,6 +1030,8 @@ class MikrotikApiService
         $L[] = '# ================================================================';
         $L[] = '# ANGALIZO: Thibitisha majina ya interface (/interface print).';
         $L[] = '# WiFi='.$wifiIf.' WAN='.$wanIf.' — badilisha kwenye SKYmanager Advanced ikiwa si sahihi.';
+        $L[] = '# HATUA 7 (DHCP): Ikiwa kuna "server or relay with such interface already exists", interface tayari ina DHCP — script haina ongeza sky-dhcp; ongeza option 114 kwa mikono au futa server inayolingana.';
+        $L[] = '# VPS WireGuard interface (SKYmanager): '.$vpsWgIface.' (from WG_INTERFACE_NAME / default wg0)';
         $L[] = '# ================================================================';
         $L[] = '';
 
@@ -953,7 +1061,7 @@ class MikrotikApiService
 
             $L[] = '# ---- HATUA 3: WireGuard Peer (VPS)';
             $L[] = ':if ([:len [/interface wireguard peers find comment="SKYmanager-VPS"]] = 0) do={';
-            $L[] = "    /interface wireguard peers add interface=\"wg-sky\" public-key=\"{$wgVpsPubKey}\" endpoint-address=\"{$wgEndpoint}\" allowed-address=\"{$apiSubnet}\" persistent-keepalive=25s comment=\"SKYmanager-VPS\"";
+            $L[] = "    /interface wireguard peers add interface=\"wg-sky\" public-key=\"{$wgVpsPubKey}\" endpoint-address=\"{$wgEndpoint}\" endpoint-port={$wgListenPort} allowed-address=\"{$apiSubnet}\" persistent-keepalive=25s comment=\"SKYmanager-VPS\"";
             $L[] = '}';
             $L[] = '';
 
@@ -992,12 +1100,21 @@ class MikrotikApiService
 
         // ── HATUA 7: DHCP ─────────────────────────────────────────────────
         $L[] = '# ---- HATUA 7: DHCP Server';
+        $L[] = ':local skyDhcpConflict 0';
+        $L[] = ":if ([:len [/ip dhcp-server find interface=\"{$hotspotIface}\"]] > 0) do={";
+        $L[] = '    :if ([:len [/ip dhcp-server find name="sky-dhcp"]] = 0) do={';
+        $L[] = '        :set skyDhcpConflict 1';
+        $L[] = "        :put (\"WARNING: DHCP server already exists on {$hotspotIface} — skipping sky-dhcp to avoid 'server or relay with such interface already exists'. Add RFC7710 option 114 to the existing server or remove the conflict.\")";
+        $L[] = '    }';
+        $L[] = '}';
         $L[] = ':if ([:len [/ip pool find name="sky-pool"]] = 0) do={';
         $L[] = "    /ip pool add name=\"sky-pool\" ranges=\"{$dhcpPool}\"";
         $L[] = '}';
-        $L[] = ':if ([:len [/ip dhcp-server find name="sky-dhcp"]] = 0) do={';
-        $L[] = "    /ip dhcp-server add name=\"sky-dhcp\" interface=\"{$hotspotIface}\" address-pool=\"sky-pool\" lease-time=1h disabled=no comment=\"SKYmanager DHCP\"";
-        $L[] = "    /ip dhcp-server network add address=\"{$hotspotNet}\" gateway=\"{$hotspotGw}\" dns-server=\"{$hotspotGw}\" comment=\"SKYmanager DHCP Network\"";
+        $L[] = ':if ($skyDhcpConflict = 0) do={';
+        $L[] = '    :if ([:len [/ip dhcp-server find name="sky-dhcp"]] = 0) do={';
+        $L[] = "        /ip dhcp-server add name=\"sky-dhcp\" interface=\"{$hotspotIface}\" address-pool=\"sky-pool\" lease-time=1h disabled=no comment=\"SKYmanager DHCP\"";
+        $L[] = "        /ip dhcp-server network add address=\"{$hotspotNet}\" gateway=\"{$hotspotGw}\" dns-server=\"{$hotspotGw}\" comment=\"SKYmanager DHCP Network\"";
+        $L[] = '    }';
         $L[] = '}';
         $L[] = '';
 
@@ -1193,8 +1310,17 @@ class MikrotikApiService
             $L[] = ':put "WireGuard Public Key ya Router Hii:"';
             $L[] = ':put $wgPubKey';
             $L[] = ':put ""';
-            $L[] = ':put "Amri ya VPS (iendesha kwenye Linux VPS):"';
-            $L[] = ":put (\"  sudo wg set wg0 peer \" . \$wgPubKey . \" allowed-ips {$wgAddress} persistent-keepalive 25\")";
+            $L[] = ':put "Amri ya VPS (iendesha kwenye Linux VPS; interface: '.$vpsWgIface.'):"';
+            $L[] = ':put ("  sudo wg set '.$vpsWgIface.' peer \" . $wgPubKey . \" allowed-ips '.$wgAddress.' persistent-keepalive 25")';
+            $L[] = ':put ""';
+            $L[] = ':put "Allowed IP kwa router hii (thibitisha kwenye VPS):"';
+            $L[] = ":put \"  {$wgAddress}\"";
+            $L[] = ':put ""';
+            $L[] = ':put "VPS troubleshooting:"';
+            $L[] = ':put "  - Thibitisha jina la interface: ip link (lazima lianane na WG_INTERFACE_NAME / '.$vpsWgIface.')"';
+            $L[] = ':put "  - sudo wg show '.$vpsWgIface.'"';
+            $L[] = ':put "  - Fwanya UDP/'.(string) $wgListenPort.' kwenda VPS (ufw/security groups)"';
+            $L[] = ':put "  - Saa ya router na VPS ziwe sahihi (NTP)"';
         } else {
             $L[] = ':put ""';
             $L[] = ':put "================================================================"';
@@ -1243,20 +1369,7 @@ class MikrotikApiService
         $this->connectZtp($router);
 
         try {
-            $rows = $this->sendCommand([
-                '/interface/wireguard/peers/print',
-                '?comment=SKYmanager-VPS',
-            ]);
-            $row = $rows[0] ?? [];
-            $handshake = null;
-            if (isset($row['last-handshake'])) {
-                $ts = (int) $row['last-handshake'];
-                if ($ts > 0) {
-                    $handshake = Carbon::createFromTimestamp($ts);
-                }
-            }
-
-            return ['handshake_at' => $handshake, 'raw' => $row];
+            return $this->readWireguardPeerHandshakeAfterConnect();
         } finally {
             $this->disconnect();
         }

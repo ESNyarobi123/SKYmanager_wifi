@@ -20,6 +20,7 @@ test('claim router livewire stores router as claimed with default assumption war
         ->test(ClaimRouter::class)
         ->set('name', 'Branch Office')
         ->set('hotspot_ssid', 'GuestWiFi')
+        ->set('wg_address', '10.10.0.99/32')
         ->call('claimRouter')
         ->assertSet('claimed', true);
 
@@ -28,6 +29,35 @@ test('claim router livewire stores router as claimed with default assumption war
     expect($router->onboarding_status)->toBe(RouterOnboarding::CLAIMED)
         ->and($router->claimed_at)->not->toBeNull()
         ->and($router->onboarding_warnings['claim'] ?? [])->not->toBeEmpty();
+});
+
+test('claim router wireguard mode requires wg_address when auto assign is off', function () {
+    config(['services.wireguard.auto_assign_router_ips' => false]);
+
+    $customer = Customer::factory()->create();
+
+    Livewire::actingAs($customer)
+        ->test(ClaimRouter::class)
+        ->set('name', 'WG Test')
+        ->set('preferred_vpn_mode', 'wireguard')
+        ->set('wg_address', '')
+        ->call('claimRouter')
+        ->assertHasErrors('wg_address');
+});
+
+test('claim router persists wg_address for wireguard mode', function () {
+    config(['services.wireguard.auto_assign_router_ips' => false]);
+
+    $customer = Customer::factory()->create();
+
+    Livewire::actingAs($customer)
+        ->test(ClaimRouter::class)
+        ->set('name', 'WG Branch')
+        ->set('wg_address', '10.10.0.77/32')
+        ->call('claimRouter')
+        ->assertSet('claimed', true);
+
+    expect(Router::where('user_id', $customer->id)->sole()->wg_address)->toBe('10.10.0.77/32');
 });
 
 test('claim router advanced fields persist on router', function () {
@@ -44,6 +74,7 @@ test('claim router advanced fields persist on router', function () {
         ->set('hotspot_gateway_custom', '10.0.0.1')
         ->set('hotspot_network_custom', '10.0.0.0/24')
         ->set('preferred_vpn_mode', 'none')
+        ->set('wg_address', '')
         ->set('router_model', 'hAP ax³')
         ->set('api_username_override', 'sky-api-2')
         ->set('api_port_override', 8729)
@@ -164,6 +195,28 @@ test('claimed router in wireguard mode without server env yields error suggestio
     $suggested = app(RouterHealthService::class)->evaluate($router, false)['suggested_onboarding_status'];
 
     expect($suggested)->toBe(RouterOnboarding::ERROR);
+});
+
+test('wireguard mode with complete server env but missing wg_address yields error suggestion', function () {
+    config([
+        'services.wireguard.vps_endpoint' => '203.0.113.50',
+        'services.wireguard.vps_public_key' => 'dGVzdGtleQ==',
+        'services.wireguard.listen_port' => 51820,
+        'services.wireguard.api_subnet' => '10.10.0.0/24',
+    ]);
+
+    $router = Router::factory()->create([
+        'user_id' => Customer::factory()->create()->id,
+        'onboarding_status' => RouterOnboarding::CLAIMED,
+        'script_generated_at' => null,
+        'preferred_vpn_mode' => 'wireguard',
+        'wg_address' => null,
+    ]);
+
+    $report = app(RouterHealthService::class)->evaluate($router, false);
+
+    expect($report['suggested_onboarding_status'])->toBe(RouterOnboarding::ERROR)
+        ->and($report['tunnel']['code'])->toBe('wg_address_missing');
 });
 
 test('mark script applied artisan command', function () {

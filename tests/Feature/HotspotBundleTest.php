@@ -120,7 +120,9 @@ test('bundle hash changes when customer billing plans change', function () {
 
 test('full setup script uses multi-file hotspot bundle and subdirectory html-directory', function () {
     $customer = Customer::factory()->create();
-    $router = Router::factory()->for($customer, 'user')->create();
+    $router = Router::factory()->for($customer, 'user')->create([
+        'preferred_vpn_mode' => 'none',
+    ]);
     $script = app(MikrotikApiService::class)->generateFullSetupScript($router->fresh());
 
     expect($script)->toContain('/hotspot-bundle/')

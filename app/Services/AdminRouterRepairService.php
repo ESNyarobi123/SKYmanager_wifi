@@ -108,13 +108,12 @@ class AdminRouterRepairService
     {
         try {
             $this->mikrotik->connectZtp($router);
-            $up = $this->mikrotik->checkVpnStatus();
-            $this->mikrotik->disconnect();
-            $handshake = null;
             try {
-                $st = $this->mikrotik->fetchWireguardPeerState($router);
-                $handshake = $st['handshake_at'];
-            } catch (\Throwable) {
+                $probe = $this->mikrotik->probeTunnelUpWhileConnected($router);
+                $up = $probe['tunnel_up'];
+                $handshake = $probe['handshake_at'];
+            } finally {
+                $this->mikrotik->disconnect();
             }
 
             $router->forceFill([

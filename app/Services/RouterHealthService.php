@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Router;
 use App\Support\RouterOnboarding;
+use App\Support\WireguardProvisioning;
 
 class RouterHealthService
 {
@@ -25,10 +26,10 @@ class RouterHealthService
     public function evaluate(Router $router, bool $probeLive = false): array
     {
         $wgRequired = $this->isWireguardRequired($router);
-        $wgEnvOk = $this->isWireguardEnvComplete();
+        $wgEnvOk = WireguardProvisioning::isServerConfigComplete();
 
         $onboardingDim = $this->evaluateOnboardingDimension($router, $wgRequired, $wgEnvOk);
-        $tunnel = $this->evaluateTunnel($router, $wgRequired, $wgEnvOk);
+        $tunnel = $this->evaluateTunnel($router, $wgEnvOk);
         $api = $this->evaluateApi($router, $probeLive);
         $portal = $this->evaluatePortal($router, $probeLive);
 
@@ -62,21 +63,25 @@ class RouterHealthService
         return in_array($router->preferred_vpn_mode ?? 'wireguard', ['wireguard', 'auto'], true);
     }
 
-    private function isWireguardEnvComplete(): bool
-    {
-        $endpoint = (string) config('services.wireguard.vps_endpoint', '');
-        $key = (string) config('services.wireguard.vps_public_key', '');
-
-        return $endpoint !== '' && $key !== '';
-    }
-
     /**
      * @return array{level: string, code: string, detail: string}
      */
     private function evaluateOnboardingDimension(Router $router, bool $wgRequired, bool $wgEnvOk): array
     {
         if ($wgRequired && ! $wgEnvOk) {
-            return ['level' => 'error', 'code' => 'wg_env_missing', 'detail' => 'WireGuard is required for this router but VPS WG env vars are incomplete.'];
+            $missing = implode(', ', WireguardProvisioning::missingServerEnvComponents());
+
+            return ['level' => 'error', 'code' => 'wg_env_missing', 'detail' => 'WireGuard is required but server WG env is incomplete. Missing: '.$missing.'.'];
+        }
+
+        if (($router->preferred_vpn_mode ?? '') === 'wireguard'
+            && $wgEnvOk
+            && ! WireguardProvisioning::isRouterWgAddressUsable($router->wg_address)) {
+            return [
+                'level' => 'error',
+                'code' => 'wg_tunnel_ip_missing',
+                'detail' => 'WireGuard mode requires a usable wg_address (tunnel IP /32 inside WG_API_SUBNET). Set it in Advanced when claiming or enable WG_AUTO_ASSIGN_IPS.',
+            ];
         }
 
         if ($router->onboarding_status === RouterOnboarding::ERROR) {
@@ -89,19 +94,38 @@ class RouterHealthService
     /**
      * @return array{level: string, code: string, detail: string}
      */
-    private function evaluateTunnel(Router $router, bool $wgRequired, bool $wgEnvOk): array
+    private function evaluateTunnel(Router $router, bool $wgEnvOk): array
     {
-        if (! $wgRequired || ($router->preferred_vpn_mode ?? '') === 'none') {
+        if (($router->preferred_vpn_mode ?? '') === 'none') {
             return ['level' => 'healthy', 'code' => 'tunnel_not_required', 'detail' => 'VPN not required for this router.'];
         }
 
-        if (! $wgEnvOk) {
-            return ['level' => 'error', 'code' => 'wg_config_incomplete', 'detail' => 'Server-side WireGuard configuration is incomplete.'];
+        if (($router->preferred_vpn_mode ?? '') === 'auto' && $wgEnvOk && ! WireguardProvisioning::isRouterWgAddressUsable($router->wg_address)) {
+            return [
+                'level' => 'healthy',
+                'code' => 'tunnel_auto_skipped_no_client_ip',
+                'detail' => 'Auto mode without wg_address — hotspot script runs without WireGuard until you assign a tunnel IP.',
+            ];
         }
 
-        $wgAddr = (string) ($router->wg_address ?? '');
-        if ($wgAddr === '' || str_contains($wgAddr, 'X')) {
-            return ['level' => 'warning', 'code' => 'wg_address_placeholder', 'detail' => 'Assign a real WireGuard IP for this router (wg_address).'];
+        if (! $wgEnvOk) {
+            return [
+                'level' => 'error',
+                'code' => 'wg_config_incomplete',
+                'detail' => 'Server-side WireGuard configuration is incomplete. Missing: '.implode(', ', WireguardProvisioning::missingServerEnvComponents()).'.',
+            ];
+        }
+
+        if (($router->preferred_vpn_mode ?? '') === 'wireguard' && ! WireguardProvisioning::isRouterWgAddressUsable($router->wg_address)) {
+            return [
+                'level' => 'error',
+                'code' => 'wg_address_missing',
+                'detail' => 'WireGuard tunnel IP (wg_address) is missing or invalid. Set it in Advanced when claiming or use WG_AUTO_ASSIGN_IPS.',
+            ];
+        }
+
+        if (! WireguardProvisioning::shouldGenerateWireguardSection($router)) {
+            return ['level' => 'healthy', 'code' => 'tunnel_wg_section_off', 'detail' => 'WireGuard block not used for this router (mode / inputs).'];
         }
 
         if ($router->last_tunnel_ok === true) {
@@ -131,20 +155,13 @@ class RouterHealthService
             try {
                 try {
                     $this->mikrotik->connectZtp($router);
-                    $this->mikrotik->getSystemResources();
-                    $tunnelUp = false;
                     try {
-                        $tunnelUp = $this->mikrotik->checkVpnStatus();
-                    } catch (\Throwable) {
-                        $tunnelUp = false;
-                    }
-                    $this->mikrotik->disconnect();
-
-                    $handshake = null;
-                    try {
-                        $wgState = $this->mikrotik->fetchWireguardPeerState($router);
-                        $handshake = $wgState['handshake_at'];
-                    } catch (\Throwable) {
+                        $this->mikrotik->getSystemResources();
+                        $probe = $this->mikrotik->probeTunnelUpWhileConnected($router);
+                        $tunnelUp = $probe['tunnel_up'];
+                        $handshake = $probe['handshake_at'];
+                    } finally {
+                        $this->mikrotik->disconnect();
                     }
 
                     $router->forceFill([
@@ -282,6 +299,10 @@ class RouterHealthService
         bool $probeLive
     ): string {
         if ($wgRequired && ! $wgEnvOk) {
+            return RouterOnboarding::ERROR;
+        }
+
+        if (in_array($tunnel['code'], ['wg_address_missing', 'wg_config_incomplete'], true)) {
             return RouterOnboarding::ERROR;
         }
 

@@ -54,6 +54,8 @@ return [
         'vps_public_key' => env('WG_VPS_PUBLIC_KEY'),
         'listen_port' => env('WG_LISTEN_PORT', 51820),
         'api_subnet' => env('WG_API_SUBNET', '10.10.0.0/24'),
+        'vps_interface_name' => env('WG_INTERFACE_NAME', 'wg0'),
+        'auto_assign_router_ips' => filter_var(env('WG_AUTO_ASSIGN_IPS', false), FILTER_VALIDATE_BOOL),
     ],
 
 ];

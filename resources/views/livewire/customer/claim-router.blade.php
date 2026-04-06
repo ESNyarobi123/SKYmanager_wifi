@@ -64,14 +64,14 @@
                             </flux:field>
 
                             <flux:field>
-                                <flux:label>{{ __('Router IP Address') }}</flux:label>
+                                <flux:label>{{ __('Router IP (before VPN)') }}</flux:label>
                                 <flux:input
                                     wire:model="ip_address"
                                     type="text"
-                                    placeholder="10.10.0.x"
+                                    placeholder="192.168.88.1"
                                     class="font-mono"
                                 />
-                                <flux:description>{{ __('WireGuard VPN IP (optional)') }}</flux:description>
+                                <flux:description>{{ __('Optional — LAN or public IP you use to reach the router before WireGuard is up (not the WG tunnel IP).') }}</flux:description>
                                 <flux:error name="ip_address" />
                             </flux:field>
                         </div>
@@ -146,7 +146,7 @@
 
                                     <flux:field>
                                         <flux:label>{{ __('VPN mode') }}</flux:label>
-                                        <flux:select wire:model="preferred_vpn_mode" class="w-full max-w-md">
+                                        <flux:select wire:model.live="preferred_vpn_mode" class="w-full max-w-md">
                                             <flux:select.option value="wireguard">{{ __('WireGuard to SKYmanager (recommended)') }}</flux:select.option>
                                             <flux:select.option value="auto">{{ __('Auto — use WG only if server is fully configured') }}</flux:select.option>
                                             <flux:select.option value="none">{{ __('None — no VPN block in script') }}</flux:select.option>
@@ -154,6 +154,33 @@
                                         <flux:description>{{ __('Choose None only if you manage remote access yourself.') }}</flux:description>
                                         <flux:error name="preferred_vpn_mode" />
                                     </flux:field>
+
+                                    @if($preferred_vpn_mode === 'wireguard')
+                                        <div class="rounded-lg border border-sky-200/80 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/20 p-4 space-y-4">
+                                            <flux:field>
+                                                <flux:label>{{ __('WireGuard tunnel IP (wg_address)') }}</flux:label>
+                                                <flux:input
+                                                    wire:model="wg_address"
+                                                    type="text"
+                                                    placeholder="10.10.0.5/32"
+                                                    class="font-mono"
+                                                    :disabled="$this->wireguardAutoAssignOffered && $wg_auto_assign"
+                                                />
+                                                <flux:description>
+                                                    {{ __('Must be a free /32 inside WG_API_SUBNET on the server (ask your admin if unsure).') }}
+                                                </flux:description>
+                                                <flux:error name="wg_address" />
+                                            </flux:field>
+                                            @if($this->wireguardAutoAssignOffered)
+                                                <flux:checkbox
+                                                    wire:model.live="wg_auto_assign"
+                                                    :label="__('Assign WireGuard IP automatically from pool')"
+                                                />
+                                                <flux:description>{{ __('Uses WG_AUTO_ASSIGN_IPS and WG_API_SUBNET — only when server WG env is complete.') }}</flux:description>
+                                                <flux:error name="wg_auto_assign" />
+                                            @endif
+                                        </div>
+                                    @endif
 
                                     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                         <flux:field>

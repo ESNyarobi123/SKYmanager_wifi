@@ -29,13 +29,12 @@ class SyncRouterTunnelStateCommand extends Command
         foreach ($routers as $router) {
             try {
                 $mikrotik->connectZtp($router);
-                $up = $mikrotik->checkVpnStatus();
-                $mikrotik->disconnect();
-                $handshake = null;
                 try {
-                    $st = $mikrotik->fetchWireguardPeerState($router);
-                    $handshake = $st['handshake_at'];
-                } catch (\Throwable) {
+                    $probe = $mikrotik->probeTunnelUpWhileConnected($router);
+                    $up = $probe['tunnel_up'];
+                    $handshake = $probe['handshake_at'];
+                } finally {
+                    $mikrotik->disconnect();
                 }
 
                 $router->forceFill([
