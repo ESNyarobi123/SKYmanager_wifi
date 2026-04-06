@@ -3,12 +3,14 @@
 namespace App\Livewire\Customer;
 
 use App\Models\Router;
+use App\Models\RouterHotspotActiveSession;
 use App\Models\User;
 use App\Services\HotspotBundleService;
 use App\Services\MikrotikApiService;
 use App\Services\RouterOnboardingService;
 use App\Support\RouterOnboarding;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\On;
@@ -25,6 +27,8 @@ class MyRouters extends Component
     public bool $showScriptModal = false;
 
     public bool $showRenameModal = false;
+
+    public bool $showDeleteModal = false;
 
     public string $generatedScript = '';
 
@@ -131,6 +135,61 @@ class MyRouters extends Component
     {
         $this->showDetailModal = false;
         $this->selectedRouterId = null;
+    }
+
+    public function openDeleteModal(string $routerId): void
+    {
+        if (! $this->customer->routers()->whereKey($routerId)->exists()) {
+            return;
+        }
+
+        $this->selectedRouterId = $routerId;
+        $this->showDeleteModal = true;
+    }
+
+    public function closeDeleteModal(): void
+    {
+        $this->showDeleteModal = false;
+        $this->selectedRouterId = null;
+    }
+
+    public function deleteRouter(): void
+    {
+        $router = $this->customer->routers()->findOrFail($this->selectedRouterId);
+
+        DB::transaction(function () use ($router) {
+            RouterHotspotActiveSession::query()->where('router_id', $router->id)->delete();
+            $router->subscriptions()->update(['status' => 'expired']);
+            $router->delete();
+        });
+
+        $this->showDeleteModal = false;
+        $this->showDetailModal = false;
+        $this->selectedRouterId = null;
+        unset($this->routers);
+
+        $this->dispatch('notify', message: __('Router removed from your account.'), type: 'success');
+    }
+
+    public function openRenameFromDetail(): void
+    {
+        if (! $this->selectedRouterId || ! $this->selectedRouter) {
+            return;
+        }
+
+        $this->showDetailModal = false;
+        $this->openRenameModal($this->selectedRouterId);
+    }
+
+    public function openDeleteFromDetail(): void
+    {
+        if (! $this->selectedRouterId) {
+            return;
+        }
+
+        $routerId = $this->selectedRouterId;
+        $this->showDetailModal = false;
+        $this->openDeleteModal($routerId);
     }
 
     public function markScriptPasted(): void

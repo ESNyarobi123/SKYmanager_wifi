@@ -28,12 +28,14 @@
         <span class="text-sm font-medium" x-text="message"></span>
     </div>
 
+    <div class="w-full max-w-6xl mx-auto min-w-0">
     <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6">
-        <div>
-            <h1 class="text-xl font-semibold text-gray-800 dark:text-neutral-200">{{ __('My Routers') }}</h1>
-            <p class="mt-1 text-sm text-gray-500 dark:text-neutral-500">{{ __('Manage your MikroTik routers') }}</p>
+        <div class="min-w-0">
+            <h1 class="text-2xl font-semibold tracking-tight text-gray-900 dark:text-neutral-100">{{ __('My Routers') }}</h1>
+            <p class="mt-1.5 text-sm text-gray-600 dark:text-neutral-400 max-w-2xl">{{ __('Manage your MikroTik routers, hotspot bundle, and setup from one place.') }}</p>
+            <p class="mt-2 text-xs text-gray-500 dark:text-neutral-500">{{ __('Edit the display name anytime. To remove a router, use “Remove router” in Details or on the card.') }}</p>
         </div>
-        <flux:button :href="route('customer.routers.claim')" variant="primary" size="sm" wire:navigate>
+        <flux:button :href="route('customer.routers.claim')" variant="primary" size="sm" wire:navigate class="shrink-0">
             <x-lucide name="plus-circle" class="size-3.5 me-1.5"/>
             {{ __('Add Router') }}
         </flux:button>
@@ -54,43 +56,48 @@
             </flux:button>
         </div>
     @else
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 mb-6">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 sm:gap-6 mb-8">
             @foreach($this->routers as $router)
-                <div class="flex flex-col bg-white border border-gray-200 shadow-sm rounded-xl dark:bg-neutral-800 dark:border-neutral-700 overflow-hidden hover:shadow-md transition-shadow">
-                    {{-- Card Header --}}
-                    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100 dark:border-neutral-700">
-                        <div class="flex items-center gap-3">
-                            <div class="relative">
-                                <div class="inline-flex items-center justify-center size-10 rounded-xl bg-sky-100 dark:bg-sky-800/30">
-                                    <x-lucide name="wifi" class="size-5 text-sky-600 dark:text-sky-400"/>
+                <div class="flex flex-col w-full min-w-0 bg-white border border-gray-200/80 shadow-md shadow-gray-200/50 rounded-2xl dark:bg-neutral-800 dark:border-neutral-700 dark:shadow-none overflow-hidden hover:border-sky-200 dark:hover:border-sky-800 transition-colors">
+                    {{-- Card Header: stack on small screens so badges are not squeezed --}}
+                    <div class="px-4 sm:px-6 py-5 border-b border-gray-100 dark:border-neutral-700 bg-gradient-to-b from-gray-50/80 to-white dark:from-neutral-800/80 dark:to-neutral-800">
+                        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                            <div class="flex items-start gap-4 min-w-0">
+                                <div class="relative shrink-0">
+                                    <div class="inline-flex items-center justify-center size-12 sm:size-14 rounded-2xl bg-sky-100 dark:bg-sky-900/40 ring-1 ring-sky-200/60 dark:ring-sky-800">
+                                        <x-lucide name="wifi" class="size-6 sm:size-7 text-sky-600 dark:text-sky-400"/>
+                                    </div>
+                                    <span class="absolute -bottom-0.5 -right-0.5 size-3.5 rounded-full border-[3px] border-white dark:border-neutral-800 {{ $router->is_online ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-neutral-500' }}"></span>
                                 </div>
-                                <span class="absolute -bottom-0.5 -right-0.5 size-3 rounded-full border-2 border-white dark:border-neutral-800 {{ $router->is_online ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-neutral-500' }}"></span>
+                                <div class="min-w-0 flex-1">
+                                    <h2 class="text-lg sm:text-xl font-semibold text-gray-900 dark:text-neutral-100 leading-snug break-words">{{ $router->name }}</h2>
+                                    <p class="text-sm text-gray-500 dark:text-neutral-400 mt-0.5 break-words">{{ $router->hotspot_ssid ?: __('SSID not set') }}</p>
+                                </div>
                             </div>
-                            <div>
-                                <p class="font-semibold text-gray-800 dark:text-neutral-200 text-sm">{{ $router->name }}</p>
-                                <p class="text-xs text-gray-500 dark:text-neutral-400">{{ $router->hotspot_ssid }}</p>
+                            <div class="flex flex-wrap gap-2 sm:flex-col sm:items-end lg:flex-row lg:items-center">
+                                <flux:badge
+                                    color="{{ $router->is_online ? 'green' : 'zinc' }}"
+                                    size="sm"
+                                    class="shrink-0"
+                                >
+                                    {{ $router->is_online ? __('Online') : __('Offline') }}
+                                </flux:badge>
+                                @php $onbLabel = \App\Support\RouterOnboarding::label($router->onboarding_status); @endphp
+                                <flux:badge
+                                    color="{{ $this->onboardingBadgeVariant($router->onboarding_status) }}"
+                                    size="sm"
+                                    title="{{ $onbLabel }} — {{ $router->last_error_message ?? '' }}"
+                                    class="!whitespace-normal !text-left max-w-full sm:max-w-[14rem] leading-snug"
+                                >
+                                    {{ $onbLabel }}
+                                </flux:badge>
                             </div>
-                        </div>
-                        <div class="flex flex-col items-end gap-1">
-                            <flux:badge
-                                color="{{ $router->is_online ? 'green' : 'zinc' }}"
-                                size="sm"
-                            >
-                                {{ $router->is_online ? __('Online') : __('Offline') }}
-                            </flux:badge>
-                            <flux:badge
-                                color="{{ $this->onboardingBadgeVariant($router->onboarding_status) }}"
-                                size="sm"
-                                title="{{ $router->last_error_message }}"
-                            >
-                                {{ \App\Support\RouterOnboarding::label($router->onboarding_status) }}
-                            </flux:badge>
                         </div>
                     </div>
 
                     {{-- Card Body --}}
-                    <div class="flex-1 px-5 py-4 space-y-3">
-                        <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div class="flex-1 px-4 sm:px-6 py-5 space-y-4">
+                        <div class="grid grid-cols-2 gap-x-4 gap-y-4 text-sm">
                             <div>
                                 <p class="text-xs text-gray-400 dark:text-neutral-500">{{ __('IP Address') }}</p>
                                 <p class="font-medium text-gray-700 dark:text-neutral-300 font-mono text-xs mt-0.5">{{ $router->ip_address ?? '—' }}</p>
@@ -178,26 +185,31 @@
                         </div>
                     </div>
 
-                    {{-- Card Actions --}}
-                    <div class="px-5 py-3 bg-gray-50 dark:bg-neutral-700/30 border-t border-gray-100 dark:border-neutral-700 flex flex-wrap gap-2">
-                        <flux:button :href="route('customer.client-sessions').'?router='.urlencode($router->id)" variant="ghost" size="sm" icon="users" class="flex-1" wire:navigate>
-                            {{ __('Clients') }}
-                        </flux:button>
-                        <flux:button :href="route('customer.plans.hotspot-bundle', ['routerId' => $router->id])" variant="ghost" size="sm" icon="folder-open" class="flex-1" wire:navigate>
-                            {{ __('Bundle') }}
-                        </flux:button>
-                        <flux:button wire:click="regeneratePortalBundle('{{ $router->id }}')" variant="ghost" size="sm" icon="arrow-path" class="flex-1">
-                            {{ __('Refresh bundle') }}
-                        </flux:button>
-                        <flux:button wire:click="viewRouter('{{ $router->id }}')" variant="ghost" size="sm" icon="eye" class="flex-1">
-                            {{ __('Details') }}
-                        </flux:button>
-                        <flux:button wire:click="openScriptModal('{{ $router->id }}')" variant="ghost" size="sm" icon="code-bracket" class="flex-1 text-sky-600 dark:text-sky-400 border-sky-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/20">
-                            {{ __('Setup Script') }}
-                        </flux:button>
-                        <flux:button wire:click="openRenameModal('{{ $router->id }}')" variant="ghost" size="sm" icon="pencil" class="flex-1">
-                            {{ __('Rename') }}
-                        </flux:button>
+                    {{-- Card Actions: stable grid on mobile --}}
+                    <div class="px-4 sm:px-6 py-4 bg-gray-50/90 dark:bg-neutral-900/40 border-t border-gray-100 dark:border-neutral-700">
+                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            <flux:button :href="route('customer.client-sessions').'?router='.urlencode($router->id)" variant="ghost" size="sm" icon="users" class="w-full justify-center" wire:navigate>
+                                {{ __('Clients') }}
+                            </flux:button>
+                            <flux:button :href="route('customer.plans.hotspot-bundle', ['routerId' => $router->id])" variant="ghost" size="sm" icon="folder-open" class="w-full justify-center" wire:navigate>
+                                {{ __('Bundle') }}
+                            </flux:button>
+                            <flux:button wire:click="regeneratePortalBundle('{{ $router->id }}')" variant="ghost" size="sm" icon="arrow-path" class="w-full justify-center col-span-2 sm:col-span-1">
+                                {{ __('Refresh bundle') }}
+                            </flux:button>
+                            <flux:button wire:click="viewRouter('{{ $router->id }}')" variant="ghost" size="sm" icon="eye" class="w-full justify-center">
+                                {{ __('Details') }}
+                            </flux:button>
+                            <flux:button wire:click="openScriptModal('{{ $router->id }}')" variant="ghost" size="sm" icon="code-bracket" class="w-full justify-center text-sky-600 dark:text-sky-400 border border-sky-200/80 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/20">
+                                {{ __('Setup Script') }}
+                            </flux:button>
+                            <flux:button wire:click="openRenameModal('{{ $router->id }}')" variant="ghost" size="sm" icon="pencil" class="w-full justify-center">
+                                {{ __('Edit name') }}
+                            </flux:button>
+                            <flux:button wire:click="openDeleteModal('{{ $router->id }}')" variant="ghost" size="sm" icon="trash" class="w-full justify-center col-span-2 sm:col-span-3 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30">
+                                {{ __('Remove router') }}
+                            </flux:button>
+                        </div>
                     </div>
                 </div>
             @endforeach
@@ -280,6 +292,15 @@
                 <flux:button :href="route('customer.client-sessions').'?router='.urlencode($this->selectedRouter->id)" variant="primary" size="sm" wire:navigate icon="users" class="w-full">
                     {{ __('View client sessions for this router') }}
                 </flux:button>
+
+                <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center pt-1">
+                    <flux:button wire:click="openRenameFromDetail" variant="ghost" size="sm" icon="pencil" class="w-full sm:w-auto justify-center">
+                        {{ __('Edit display name') }}
+                    </flux:button>
+                    <flux:button wire:click="openDeleteFromDetail" variant="ghost" size="sm" icon="trash" class="w-full sm:w-auto justify-center text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30">
+                        {{ __('Remove router') }}
+                    </flux:button>
+                </div>
 
                 @if($this->selectedRouter->subscriptions->isNotEmpty())
                     <flux:separator />
@@ -408,9 +429,26 @@
 
             <div class="flex justify-end gap-2 pt-1">
                 <flux:button wire:click="$set('showRenameModal', false)" variant="ghost">{{ __('Cancel') }}</flux:button>
-                <flux:button wire:click="renameRouter" variant="primary" icon="check">{{ __('Save Name') }}</flux:button>
+                <flux:button wire:click="renameRouter" variant="primary" icon="check">{{ __('Save name') }}</flux:button>
             </div>
         </div>
     </flux:modal>
 
+    {{-- Remove router confirmation --}}
+    <flux:modal wire:model="showDeleteModal" name="delete-router" class="w-full max-w-md">
+        <div class="space-y-4">
+            <div>
+                <flux:heading size="lg">{{ __('Remove this router?') }}</flux:heading>
+                <flux:text class="text-zinc-500 text-sm mt-2 leading-relaxed">
+                    {{ __('It will disappear from your portal. Active subscriptions on this router will be marked expired. Payment history stays in your records where applicable. You can claim the router again later if you still have access to it.') }}
+                </flux:text>
+            </div>
+            <div class="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-1">
+                <flux:button wire:click="closeDeleteModal" variant="ghost">{{ __('Cancel') }}</flux:button>
+                <flux:button wire:click="deleteRouter" variant="danger" icon="trash">{{ __('Yes, remove router') }}</flux:button>
+            </div>
+        </div>
+    </flux:modal>
+
+    </div>
 </div>
