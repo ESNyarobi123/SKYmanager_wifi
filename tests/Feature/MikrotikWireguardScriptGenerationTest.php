@@ -18,6 +18,7 @@ beforeEach(function () {
         'services.wireguard.api_subnet' => '10.10.0.0/24',
         'services.wireguard.vps_interface_name' => 'wg-sky',
         'services.wireguard.auto_assign_router_ips' => false,
+        'skymanager.wireguard.vps_interface_name' => '',
     ]);
 });
 
@@ -33,8 +34,33 @@ test('full setup script includes endpoint-port and VPS helper uses configured in
     expect($script)->toContain('endpoint-port=51820')
         ->and($script)->toContain('endpoint-address="203.0.113.50"')
         ->and($script)->toContain('persistent-keepalive=25s')
-        ->and($script)->toContain('sudo wg set wg-sky peer')
-        ->and($script)->not->toContain('sudo wg set wg0 peer');
+        ->and($script)->toContain('/interface wireguard peers set [find comment="SKYmanager-VPS"]')
+        ->and($script)->toContain('/interface wireguard peers add interface="wg-sky"')
+        ->and($script)->toContain('/interface wireguard set [find name="wg-sky"] listen-port=51820')
+        ->and($script)->toContain('resolved VPS Linux WG interface (sudo wg): wg-sky')
+        ->and($script)->toContain(':put ("  sudo wg set wg-sky peer " . $wgPubKey . " allowed-ips 10.10.0.44/32 persistent-keepalive 25")')
+        ->and($script)->not->toContain('peer \\" . $wgPubKey')
+        ->and($script)->not->toContain('sudo wg set wg0 peer')
+        ->and($script)->not->toContain('default wg0');
+});
+
+test('skymanager wireguard vps interface overrides services.wireguard value', function () {
+    config([
+        'services.wireguard.vps_interface_name' => 'wg0',
+        'skymanager.wireguard.vps_interface_name' => 'wg-sky',
+    ]);
+
+    $customer = Customer::factory()->create();
+    $router = Router::factory()->for($customer, 'user')->create([
+        'preferred_vpn_mode' => 'wireguard',
+        'wg_address' => '10.10.0.44/32',
+    ]);
+
+    $script = app(MikrotikApiService::class)->generateFullSetupScript($router->fresh());
+
+    expect($script)->toContain('sudo wg set wg-sky peer')
+        ->and($script)->toContain('Linux WG interface on VPS: wg-sky')
+        ->and(WireguardProvisioning::vpsInterfaceName())->toBe('wg-sky');
 });
 
 test('script omits wireguard peer block when WG_VPS_ENDPOINT is missing', function () {

@@ -940,7 +940,8 @@ class MikrotikApiService
         $wgEndpoint = trim((string) config('services.wireguard.vps_endpoint', ''));
         $wgVpsPubKey = trim((string) config('services.wireguard.vps_public_key', ''));
         $wgListenPort = WireguardProvisioning::listenPort();
-        $vpsWgIface = WireguardProvisioning::vpsInterfaceName();
+        $wgScriptCtx = WireguardProvisioning::resolvedVpsScriptContext();
+        $vpsWgIface = $wgScriptCtx['vps_interface'];
 
         $hasWg = WireguardProvisioning::shouldGenerateWireguardSection($router);
         $wgHardFail = WireguardProvisioning::wireguardHardRequiredButIncomplete($router);
@@ -1031,7 +1032,10 @@ class MikrotikApiService
         $L[] = '# ANGALIZO: Thibitisha majina ya interface (/interface print).';
         $L[] = '# WiFi='.$wifiIf.' WAN='.$wanIf.' — badilisha kwenye SKYmanager Advanced ikiwa si sahihi.';
         $L[] = '# HATUA 7 (DHCP): Ikiwa kuna "server or relay with such interface already exists", interface tayari ina DHCP — script haina ongeza sky-dhcp; ongeza option 114 kwa mikono au futa server inayolingana.';
-        $L[] = '# VPS WireGuard interface (SKYmanager): '.$vpsWgIface.' (from WG_INTERFACE_NAME / default wg0)';
+        $L[] = '# SKYmanager resolved VPS Linux WG interface (sudo wg): '.$vpsWgIface;
+        if (WireguardProvisioning::isServerConfigComplete()) {
+            $L[] = '# SKYmanager resolved WG endpoint: '.$wgEndpoint.':'.$wgListenPort.' allowed-address (peer): '.$apiSubnet;
+        }
         $L[] = '# ================================================================';
         $L[] = '';
 
@@ -1053,15 +1057,26 @@ class MikrotikApiService
 
         // ── HATUA 2-4: WireGuard (skipped when not configured) ───────────
         if ($hasWg) {
-            $L[] = '# ---- HATUA 2: WireGuard Interface';
+            $rosEsc = static function (string $s): string {
+                return str_replace(['\\', '"'], ['\\\\', '\\"'], $s);
+            };
+            $pkEsc = $rosEsc($wgVpsPubKey);
+            $epEsc = $rosEsc($wgEndpoint);
+            $subnetEsc = $rosEsc($apiSubnet);
+
+            $L[] = '# ---- HATUA 2: WireGuard Interface (add or reconcile listen-port)';
             $L[] = ':if ([:len [/interface wireguard find name="wg-sky"]] = 0) do={';
             $L[] = "    /interface wireguard add name=\"wg-sky\" listen-port={$wgListenPort} comment=\"SKYmanager VPN\"";
+            $L[] = '} else={';
+            $L[] = "    /interface wireguard set [find name=\"wg-sky\"] listen-port={$wgListenPort} comment=\"SKYmanager VPN\"";
             $L[] = '}';
             $L[] = '';
 
-            $L[] = '# ---- HATUA 3: WireGuard Peer (VPS)';
-            $L[] = ':if ([:len [/interface wireguard peers find comment="SKYmanager-VPS"]] = 0) do={';
-            $L[] = "    /interface wireguard peers add interface=\"wg-sky\" public-key=\"{$wgVpsPubKey}\" endpoint-address=\"{$wgEndpoint}\" endpoint-port={$wgListenPort} allowed-address=\"{$apiSubnet}\" persistent-keepalive=25s comment=\"SKYmanager-VPS\"";
+            $L[] = '# ---- HATUA 3: WireGuard Peer (VPS) — add or repair SKYmanager-VPS peer';
+            $L[] = ':if ([:len [/interface wireguard peers find comment="SKYmanager-VPS"]] > 0) do={';
+            $L[] = '    /interface wireguard peers set [find comment="SKYmanager-VPS"] interface="wg-sky" public-key="'.$pkEsc.'" endpoint-address="'.$epEsc.'" endpoint-port='.$wgListenPort.' allowed-address="'.$subnetEsc.'" persistent-keepalive=25s comment="SKYmanager-VPS"';
+            $L[] = '} else={';
+            $L[] = '    /interface wireguard peers add interface="wg-sky" public-key="'.$pkEsc.'" endpoint-address="'.$epEsc.'" endpoint-port='.$wgListenPort.' allowed-address="'.$subnetEsc.'" persistent-keepalive=25s comment="SKYmanager-VPS"';
             $L[] = '}';
             $L[] = '';
 
@@ -1310,17 +1325,23 @@ class MikrotikApiService
             $L[] = ':put "WireGuard Public Key ya Router Hii:"';
             $L[] = ':put $wgPubKey';
             $L[] = ':put ""';
-            $L[] = ':put "Amri ya VPS (iendesha kwenye Linux VPS; interface: '.$vpsWgIface.'):"';
-            $L[] = ':put ("  sudo wg set '.$vpsWgIface.' peer \" . $wgPubKey . \" allowed-ips '.$wgAddress.' persistent-keepalive 25")';
+            $L[] = ':put "SKYmanager resolved values (must match VPS + .env at generation time):"';
+            $L[] = ':put "  Linux WG interface on VPS: '.$vpsWgIface.'"';
+            $L[] = ':put "  VPS endpoint: '.$wgEndpoint.':'.$wgListenPort.'"';
+            $L[] = ':put "  allowed-ips for this router on VPS: '.$wgAddress.'"';
             $L[] = ':put ""';
-            $L[] = ':put "Allowed IP kwa router hii (thibitisha kwenye VPS):"';
-            $L[] = ":put \"  {$wgAddress}\"";
+            $L[] = ':put "Amri ya VPS (nakili kamili — Linux, si RouterOS):"';
+            $L[] = ':put ("  sudo wg set '.$vpsWgIface.' peer " . $wgPubKey . " allowed-ips '.$wgAddress.' persistent-keepalive 25")';
             $L[] = ':put ""';
-            $L[] = ':put "VPS troubleshooting:"';
-            $L[] = ':put "  - Thibitisha jina la interface: ip link (lazima lianane na WG_INTERFACE_NAME / '.$vpsWgIface.')"';
-            $L[] = ':put "  - sudo wg show '.$vpsWgIface.'"';
-            $L[] = ':put "  - Fwanya UDP/'.(string) $wgListenPort.' kwenda VPS (ufw/security groups)"';
-            $L[] = ':put "  - Saa ya router na VPS ziwe sahihi (NTP)"';
+            $L[] = ':put "VPS / tunnel verification:"';
+            $L[] = ':put "  sudo wg show '.$vpsWgIface.'"';
+            $L[] = ':put "  Thibitisha UDP/'.(string) $wgListenPort.' inafika VPS (ufw, security groups)"';
+            $pingHint = WireguardProvisioning::wgSubnetGatewayPingHint($apiSubnet);
+            if ($pingHint !== '') {
+                $L[] = ':put "  Jaribu kutoka router: /ping '.$pingHint.' count=3 (badilisha kama gateway ya VPN si .1)"';
+            }
+            $L[] = ':put "  API ya MikroTik lazima iaccept TCP/'.$apiPort.' kutoka '.$apiSubnet.' (SKYmanager inatumia subnet hii kwa ZTP)"';
+            $L[] = ':put "  Saa ya router na VPS: tumia NTP"';
         } else {
             $L[] = ':put ""';
             $L[] = ':put "================================================================"';

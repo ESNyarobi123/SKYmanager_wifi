@@ -68,11 +68,51 @@ final class WireguardProvisioning
         return true;
     }
 
+    /**
+     * Canonical Linux interface name on the VPS for `wg set` / `wg show` (not the MikroTik if name).
+     */
     public static function vpsInterfaceName(): string
     {
-        $name = trim((string) config('services.wireguard.vps_interface_name', 'wg0'));
+        $override = trim((string) config('skymanager.wireguard.vps_interface_name', ''));
+        if ($override !== '') {
+            return $override;
+        }
+
+        $name = trim((string) config('services.wireguard.vps_interface_name', ''));
 
         return $name !== '' ? $name : 'wg0';
+    }
+
+    /**
+     * Values embedded into generated RouterOS script header/footer (single source of truth).
+     *
+     * @return array{
+     *     vps_interface: string,
+     *     vps_endpoint: string,
+     *     listen_port: int,
+     *     api_subnet: string
+     * }
+     */
+    public static function resolvedVpsScriptContext(): array
+    {
+        return [
+            'vps_interface' => self::vpsInterfaceName(),
+            'vps_endpoint' => trim((string) config('services.wireguard.vps_endpoint', '')),
+            'listen_port' => self::listenPort(),
+            'api_subnet' => trim((string) config('services.wireguard.api_subnet', '')),
+        ];
+    }
+
+    /**
+     * Typical VPN gateway inside WG_API_SUBNET (/24) for operator ping hints.
+     */
+    public static function wgSubnetGatewayPingHint(string $apiSubnetCidr): string
+    {
+        if (! preg_match('#^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}/24$#', trim($apiSubnetCidr), $m)) {
+            return '';
+        }
+
+        return $m[1].'.1';
     }
 
     public static function listenPort(): int

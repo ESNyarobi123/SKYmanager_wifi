@@ -42,4 +42,15 @@ return [
     /** Milliseconds to sleep between routers when syncing in batch (API load). */
     'router_hotspot_sessions_sync_sleep_ms' => (int) env('SKYMANAGER_ROUTER_HOTSPOT_SESSION_SYNC_SLEEP_MS', 250),
 
+    /*
+    |--------------------------------------------------------------------------
+    | WireGuard (optional override for script footer / operator hints)
+    |--------------------------------------------------------------------------
+    | Primary keys live in config/services.php (WG_*). Set this only if you need
+    | a skymanager-specific override without changing services.wireguard.
+    */
+    'wireguard' => [
+        'vps_interface_name' => (string) (env('SKYMANAGER_WG_SCRIPT_VPS_INTERFACE') ?? ''),
+    ],
+
 ];
