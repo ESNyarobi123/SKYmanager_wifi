@@ -3,7 +3,9 @@
 namespace App\Services;
 
 use App\Models\Router;
+use App\Models\User;
 use Exception;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 
 class MikrotikApiService
@@ -496,7 +498,7 @@ class MikrotikApiService
             ? explode('/', $router->wg_address)[0]
             : $router->ip_address;
 
-        $username = 'sky-api';
+        $username = $router->api_username ?: 'sky-api';
         $password = $router->ztp_api_password ?: $router->api_password;
 
         $this->socket = @fsockopen($ip, $router->api_port ?: 8728, $errno, $errstr, 5);
@@ -810,18 +812,38 @@ class MikrotikApiService
      * RouterOS v6/v7 differences are handled via :local rosMajor detection.
      *
      * No API connection required — pure string generation from model data.
+     *
+     * @param  bool  $forceRotateApiPassword  When false, an existing ztp_api_password is reused (safer for repeat runs).
      */
-    public function generateFullSetupScript(Router $router): string
+    public function generateFullSetupScript(Router $router, bool $forceRotateApiPassword = false): string
     {
-        $apiPassword = bin2hex(random_bytes(12));
-        $router->update(['ztp_api_password' => $apiPassword]);
+        $router->refresh();
+        $shouldRotate = $forceRotateApiPassword || ! $router->ztp_api_password;
+        if ($shouldRotate) {
+            $apiPassword = bin2hex(random_bytes(12));
+            $router->update([
+                'ztp_api_password' => $apiPassword,
+                'api_credentials_updated_at' => now(),
+                'api_credential_version' => ($router->api_credential_version ?? 0) + 1,
+            ]);
+        } else {
+            $apiPassword = (string) $router->ztp_api_password;
+        }
+
+        $router->ensureLocalPortalToken();
+        $router->refresh();
+        $customer = $router->user ?? new User;
+        $bundles = app(HotspotBundleService::class);
+        $bundles->syncBundleMetadata($router, $customer);
+        $router->refresh();
+        $portalToken = (string) $router->local_portal_token;
+        $skySegment = $router->portal_folder_name ?? HotspotBundleService::folderSegment($router);
 
         // Sanitise router name; trim dashes; fallback prevents empty identity error.
         $identity = trim(preg_replace('/[^a-zA-Z0-9\-]/', '-', $router->name ?? ''), '-');
         $identity = $identity ?: 'SKYmanager-Router';
 
         $portalUrl = $router->user ? $router->user->portalUrl() : url('/portal');
-        $loginHtmlUrl = url('/hotspot-login.html');
         $portalDomain = config('services.ztp.portal_domain', 'micro.spotbox.online');
         $vpsIp = config('services.ztp.vps_ip', '');
         $apiSubnet = config('services.wireguard.api_subnet', '10.10.0.0/24');
@@ -835,9 +857,42 @@ class MikrotikApiService
         $hotspotGw = $router->hotspot_gateway ?: '192.168.88.1';
         $hotspotNet = $router->hotspot_network ?: '192.168.88.0/24';
         $dhcpPool = $this->deriveDhcpPool($hotspotNet, $hotspotGw);
-        $apiUser = 'sky-api';
+        $apiUser = $router->api_username ?: 'sky-api';
+        $apiPort = (int) ($router->api_port ?: 8728);
+        $wifiIf = $router->wifi_interface ?: 'wlan1';
+        $wanIf = $router->wan_interface ?: 'ether1';
 
-        $hasWg = $wgEndpoint !== '' && $wgVpsPubKey !== '' && ! str_contains($wgAddress, 'X');
+        $scriptWarnings = [];
+        if (! $router->wifi_interface) {
+            $scriptWarnings[] = ['code' => 'assumed_wifi', 'message' => 'WiFi interface not set — using '.$wifiIf.' (set in Advanced on claim or edit).'];
+        }
+        if (! $router->wan_interface) {
+            $scriptWarnings[] = ['code' => 'assumed_wan', 'message' => 'WAN interface not set — using '.$wanIf.' for masquerade.'];
+        }
+        if ($router->use_default_network_settings ?? true) {
+            $scriptWarnings[] = ['code' => 'default_lan', 'message' => 'Using template LAN '.$hotspotNet.' / gateway '.$hotspotGw.' — confirm or override in Advanced.'];
+        }
+
+        $vpnMode = $router->preferred_vpn_mode ?? 'wireguard';
+        $envWgOk = $wgEndpoint !== '' && $wgVpsPubKey !== '';
+        $clientWgOk = ! str_contains($wgAddress, 'X');
+
+        $hasWg = match ($vpnMode) {
+            'none' => false,
+            'auto' => $envWgOk && $clientWgOk,
+            default => $envWgOk && $clientWgOk,
+        };
+
+        $wgHardFail = ($vpnMode === 'wireguard') && ! ($envWgOk && $clientWgOk);
+        if ($wgHardFail) {
+            $scriptWarnings[] = [
+                'code' => 'wg_required_missing',
+                'message' => 'ERROR: WireGuard is required for this router but WG_VPS_ENDPOINT / WG_VPS_PUBLIC_KEY or wg_address is incomplete. Fix .env or assign wg_address before deployment.',
+            ];
+        }
+        if ($vpnMode === 'auto' && ! $envWgOk) {
+            $scriptWarnings[] = ['code' => 'wg_skipped_auto', 'message' => 'WireGuard env incomplete — script runs without VPN (auto mode).'];
+        }
 
         // DHCP Option 114: hex-encode the URL so RouterOS never sees the 's' type
         // prefix which triggers "Unknown data type!" on RouterOS 7.x in some builds.
@@ -851,14 +906,24 @@ class MikrotikApiService
         $L[] = "# Router  : {$router->name}";
         $L[] = "# VPS     : {$vpsIp}";
         $L[] = "# Portal  : {$portalUrl}";
+        $L[] = '# Hotspot bundle: '.config('skymanager.portal_bundle_version').' sha256:'.($router->portal_bundle_hash ?? '—');
+        $L[] = '# Hotspot folder: hotspot/'.$skySegment.' (ROS7) flash/hotspot/'.$skySegment.' (ROS6)';
         $L[] = '# Tarehe  : '.now()->toDateTimeString();
+        if (! $shouldRotate) {
+            $L[] = '# NOTE: ZTP API password kept unchanged (use repair/rotate to issue a new one).';
+        }
+        foreach ($scriptWarnings as $w) {
+            $msg = is_array($w) ? (string) ($w['message'] ?? json_encode($w)) : (string) $w;
+            $L[] = '# WARNING: '.$msg;
+        }
+        $L[] = '# Interfaces: WiFi='.$wifiIf.' WAN='.$wanIf.' API port='.$apiPort.' API user='.$apiUser;
         $L[] = '# ================================================================';
         $L[] = '# PASTE KWENYE: MikroTik > New Terminal';
         $L[] = '# Script hii ni salama kurun mara nyingi (idempotent).';
+        $L[] = '# Portal: hatua za mwisho (13-14) hupakia BUNDLE KAMILI — faili zote (login.html, rlogin, md5.js, …), si faili moja pekee.';
         $L[] = '# ================================================================';
-        $L[] = '# ANGALIZO: Kama WiFi interface yako si "wlan1" au WAN si "ether1",';
-        $L[] = '# endesha /interface print kwenye terminal, kisha badilisha majina';
-        $L[] = '# mawili hayo pekee katika script hii kabla ya kurun.';
+        $L[] = '# ANGALIZO: Thibitisha majina ya interface (/interface print).';
+        $L[] = '# WiFi='.$wifiIf.' WAN='.$wanIf.' — badilisha kwenye SKYmanager Advanced ikiwa si sahihi.';
         $L[] = '# ================================================================';
         $L[] = '';
 
@@ -898,7 +963,11 @@ class MikrotikApiService
             $L[] = '}';
             $L[] = '';
         } else {
-            $L[] = '# ---- HATUA 2-4: WireGuard imeachwa -- weka VPS config kwenye .env';
+            if ($wgHardFail) {
+                $L[] = '# ---- HATUA 2-4: WireGuard INABIDI — .env (WG_*) au wg_address si kamili. Tengeneza kisha unda script upya.';
+            } else {
+                $L[] = '# ---- HATUA 2-4: WireGuard haipo (VPN mode none / auto bila env / mazingira hayajatosha)';
+            }
             $L[] = '';
         }
 
@@ -908,10 +977,10 @@ class MikrotikApiService
         $L[] = "    /interface bridge add name=\"{$hotspotIface}\" comment=\"SKYmanager Bridge\"";
         $L[] = '}';
         $L[] = ':do {';
-        $L[] = "    :if ([:len [/interface bridge port find interface=\"wlan1\" bridge=\"{$hotspotIface}\"]] = 0) do={";
-        $L[] = "        /interface bridge port add interface=\"wlan1\" bridge=\"{$hotspotIface}\"";
+        $L[] = "    :if ([:len [/interface bridge port find interface=\"{$wifiIf}\" bridge=\"{$hotspotIface}\"]] = 0) do={";
+        $L[] = "        /interface bridge port add interface=\"{$wifiIf}\" bridge=\"{$hotspotIface}\"";
         $L[] = '    }';
-        $L[] = '} on-error={ :put "ONYO: Badilisha wlan1 kwa jina halisi la WiFi interface (/interface print)" }';
+        $L[] = '} on-error={ :put "ONYO: Badilisha WiFi interface kwenye SKYmanager Advanced au script hii" }';
         $L[] = '';
 
         // ── HATUA 6: IP address on bridge ─────────────────────────────────
@@ -982,11 +1051,11 @@ class MikrotikApiService
         // ── HATUA 11: NAT ─────────────────────────────────────────────────
         $L[] = '# ---- HATUA 11: NAT (Masquerade)';
         $L[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT-Hotspot"]] = 0) do={';
-        $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$hotspotNet}\" out-interface=\"ether1\" action=masquerade comment=\"SKY-NAT-Hotspot\"";
+        $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$hotspotNet}\" out-interface=\"{$wanIf}\" action=masquerade comment=\"SKY-NAT-Hotspot\"";
         $L[] = '}';
         if ($hasWg) {
             $L[] = ':if ([:len [/ip firewall nat find comment="SKY-NAT-WireGuard"]] = 0) do={';
-            $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$apiSubnet}\" out-interface=\"ether1\" action=masquerade comment=\"SKY-NAT-WireGuard\"";
+            $L[] = "    /ip firewall nat add chain=srcnat src-address=\"{$apiSubnet}\" out-interface=\"{$wanIf}\" action=masquerade comment=\"SKY-NAT-WireGuard\"";
             $L[] = '}';
         }
         $L[] = '';
@@ -998,27 +1067,35 @@ class MikrotikApiService
         $L[] = '}';
         $L[] = '';
 
-        // ── HATUA 13: Upload login.html ───────────────────────────────────
-        // URL includes router_id so the local page fetches THIS router's plans.
-        $loginHtmlWithId = $loginHtmlUrl.'?router_id='.urlencode($router->id);
-        $L[] = '# ---- HATUA 13: Pakia login.html (local captive portal page)';
-        $L[] = ':do {';
-        $L[] = "    /tool fetch url=\"{$loginHtmlWithId}\" dst-path=\"hotspot/login.html\" keep-result=yes";
-        $L[] = '    :put "login.html imepakiwa vizuri"';
-        $L[] = '} on-error={';
-        $L[] = '    :put "ONYO: login.html haikupakiwa -- angalia muunganiko wa internet"';
+        // ── HATUA 13: Full hotspot bundle (popup-safe subdirectory) ───────
+        $L[] = '# ---- HATUA 13: Pakia bundle kamili (login, rlogin, md5.js, nk.)';
+        $L[] = '# LEGACY: routers zilizoweka tu hotspot/login.html bado: '.url('/hotspot-login.html').'?router_id='.$router->id;
+        $L[] = ':put "SKYmanager: inapakia portal bundle — subfolder '.$skySegment.'..."';
+        $L[] = ':if ($rosMajor >= 7) do={';
+        foreach (HotspotBundleService::BUNDLE_FILES as $bundleFile) {
+            $fetchUrl = $bundles->publicFileUrl($router, $bundleFile, $portalToken);
+            $dstPath = 'hotspot/'.$skySegment.'/'.$bundleFile;
+            $L[] = "    :do { /tool fetch url=\"{$fetchUrl}\" dst-path=\"{$dstPath}\" keep-result=yes } on-error={ :put \"SKY FETCH ERROR: {$bundleFile}\" }";
+        }
+        $L[] = '} else={';
+        foreach (HotspotBundleService::BUNDLE_FILES as $bundleFile) {
+            $fetchUrl = $bundles->publicFileUrl($router, $bundleFile, $portalToken);
+            $dstPath = 'flash/hotspot/'.$skySegment.'/'.$bundleFile;
+            $L[] = "    :do { /tool fetch url=\"{$fetchUrl}\" dst-path=\"{$dstPath}\" keep-result=yes } on-error={ :put \"SKY FETCH ERROR: {$bundleFile}\" }";
+        }
         $L[] = '}';
+        $L[] = ':put "SKYmanager: bundle fetch kumalizika (angalia errors hapo juu)"';
         $L[] = '';
 
         // ── HATUA 14: Hotspot profile ─────────────────────────────────────
         // dns-name = hotspot gateway IP (local) so the portal opens instantly
         // without needing VPS DNS resolution.
         // login-by includes 'mac' for MAC-binding auto-login after payment.
-        $L[] = '# ---- HATUA 14: Hotspot Profile (local portal mode)';
+        $L[] = '# ---- HATUA 14: Hotspot Profile (bundle subdirectory)';
         $L[] = ':if ($rosMajor >= 7) do={';
-        $L[] = "    /ip hotspot profile set [find] html-directory=\"hotspot\" login-by=\"mac,http-chap,http-pap,cookie\" dns-name=\"{$hotspotGw}\" http-cookie-lifetime=1d";
+        $L[] = "    /ip hotspot profile set [find] html-directory=\"hotspot/{$skySegment}\" login-by=\"mac,http-chap,http-pap,cookie\" dns-name=\"{$hotspotGw}\" http-cookie-lifetime=1d";
         $L[] = '} else={';
-        $L[] = "    /ip hotspot profile set [find] html-directory=\"flash/hotspot\" login-by=\"mac,cookie,http-chap,http-pap\" dns-name=\"{$hotspotGw}\"";
+        $L[] = "    /ip hotspot profile set [find] html-directory=\"flash/hotspot/{$skySegment}\" login-by=\"mac,cookie,http-chap,http-pap\" dns-name=\"{$hotspotGw}\"";
         $L[] = '}';
         $L[] = '';
 
@@ -1075,7 +1152,7 @@ class MikrotikApiService
 
         // ── HATUA 19: Lock down services ──────────────────────────────────
         $L[] = '# ---- HATUA 19: Zuia Huduma Zisizo Hitajika';
-        $L[] = ":do { /ip service set api port=8728 disabled=no address=\"{$apiSubnet}\" } on-error={}";
+        $L[] = ":do { /ip service set api port={$apiPort} disabled=no address=\"{$apiSubnet}\" } on-error={}";
         $L[] = ':do { /ip service set winbox disabled=no } on-error={}';
         $L[] = ':do { /ip service set telnet disabled=yes } on-error={}';
         $L[] = ':do { /ip service set ftp disabled=yes } on-error={}';
@@ -1093,10 +1170,10 @@ class MikrotikApiService
         $L[] = '}';
         if ($hasWg) {
             $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-API-VPN"]] = 0) do={';
-            $L[] = "    /ip firewall filter add chain=input protocol=tcp dst-port=8728 src-address=\"{$apiSubnet}\" action=accept comment=\"SKY-FW-API-VPN\"";
+            $L[] = "    /ip firewall filter add chain=input protocol=tcp dst-port={$apiPort} src-address=\"{$apiSubnet}\" action=accept comment=\"SKY-FW-API-VPN\"";
             $L[] = '}';
             $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-API-Block"]] = 0) do={';
-            $L[] = "    /ip firewall filter add chain=input protocol=tcp dst-port=8728 src-address=!{$apiSubnet} action=drop comment=\"SKY-FW-API-Block\"";
+            $L[] = "    /ip firewall filter add chain=input protocol=tcp dst-port={$apiPort} src-address=!{$apiSubnet} action=drop comment=\"SKY-FW-API-Block\"";
             $L[] = '}';
         }
         $L[] = ':if ([:len [/ip firewall filter find comment="SKY-FW-Hotspot"]] = 0) do={';
@@ -1130,7 +1207,7 @@ class MikrotikApiService
         $L[] = ':put "================================================================"';
         $L[] = ":put \"  Mtumiaji  : {$apiUser}\"";
         $L[] = ":put \"  Nenosiri  : {$apiPassword}\"";
-        $L[] = ':put "  Bandari   : 8728"';
+        $L[] = ':put "  Bandari   : '.$apiPort.'"';
         $L[] = ':put ""';
         $L[] = ':put "Hatua Inayofuata:"';
         $L[] = ':put "  1. Nakili Public Key hapo juu"';
@@ -1142,12 +1219,119 @@ class MikrotikApiService
 
         $script = implode("\n", $L);
 
+        $router->refresh();
+        app(RouterOnboardingService::class)->recordScriptGenerated(
+            $router,
+            $scriptWarnings,
+            $wgHardFail ? 'wg_required_missing' : null
+        );
+        $router->forceFill(['bundle_deployment_mode' => 'bundle'])->save();
+
         Log::info('SKYmanager: Full setup script generated', [
             'router' => $router->name,
             'ip' => $router->ip_address,
         ]);
 
         return $script;
+    }
+
+    /**
+     * @return array{handshake_at: ?Carbon, raw: array<string, string>}
+     */
+    public function fetchWireguardPeerState(Router $router): array
+    {
+        $this->connectZtp($router);
+
+        try {
+            $rows = $this->sendCommand([
+                '/interface/wireguard/peers/print',
+                '?comment=SKYmanager-VPS',
+            ]);
+            $row = $rows[0] ?? [];
+            $handshake = null;
+            if (isset($row['last-handshake'])) {
+                $ts = (int) $row['last-handshake'];
+                if ($ts > 0) {
+                    $handshake = Carbon::createFromTimestamp($ts);
+                }
+            }
+
+            return ['handshake_at' => $handshake, 'raw' => $row];
+        } finally {
+            $this->disconnect();
+        }
+    }
+
+    /**
+     * After connect(), verify expected hotspot bundle files exist and profile html-directory matches.
+     *
+     * @return array{ok: bool, issues: list<string>, profile_html_directory: ?string}
+     */
+    public function verifyHotspotBundle(Router $router): array
+    {
+        $folder = $router->portal_folder_name;
+        if ($folder === null || $folder === '') {
+            return [
+                'ok' => false,
+                'issues' => ['No portal_folder_name — run hotspot bundle sync or generate the setup script.'],
+                'profile_html_directory' => null,
+            ];
+        }
+
+        $this->connectZtp($router);
+
+        try {
+            $files = $this->sendCommand(['/file/print']);
+            $names = [];
+            foreach ($files as $row) {
+                if (isset($row['name'])) {
+                    $names[] = (string) $row['name'];
+                }
+            }
+
+            $issues = [];
+
+            foreach (HotspotBundleService::BUNDLE_FILES as $fname) {
+                $suffix = $folder.'/'.$fname;
+                $found = false;
+                foreach ($names as $n) {
+                    if ($n === $suffix || str_ends_with($n, '/'.$fname) || str_ends_with($n, $suffix)) {
+                        $found = true;
+                        break;
+                    }
+                }
+                if (! $found) {
+                    $issues[] = "Missing file on router: {$suffix}";
+                }
+            }
+
+            $profiles = $this->sendCommand(['/ip/hotspot/profile/print']);
+            $htmlDir = null;
+            foreach ($profiles as $p) {
+                if (isset($p['html-directory'])) {
+                    $htmlDir = (string) $p['html-directory'];
+                    break;
+                }
+            }
+
+            if ($htmlDir === null) {
+                $issues[] = 'Could not read hotspot profile html-directory.';
+            } else {
+                $expected7 = 'hotspot/'.$folder;
+                $expected6 = 'flash/hotspot/'.$folder;
+                if ($htmlDir !== $expected7 && $htmlDir !== $expected6 && ! str_contains($htmlDir, $folder)) {
+                    $issues[] = "html-directory \"{$htmlDir}\" does not reference expected folder \"{$folder}\".";
+                }
+            }
+
+            return [
+                'ok' => $issues === [],
+                'issues' => $issues,
+                'profile_html_directory' => $htmlDir,
+            ];
+        } finally {
+            $this->disconnect();
+        }
     }
 
     /**

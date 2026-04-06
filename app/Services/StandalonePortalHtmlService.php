@@ -10,11 +10,11 @@ use App\Models\User;
 class StandalonePortalHtmlService
 {
     /**
-     * Generate a completely self-contained login.html for the given router and
+     * Generate a completely self-contained HTML portal (legacy single-file) for the router and
      * its owning customer.
      *
-     * The returned string is ready to be saved as hotspot/login.html and
-     * uploaded to a MikroTik router. It contains:
+     * The returned string can be saved as hotspot/login.html on the router when using
+     * this legacy path; production setups should use the hotspot bundle + setup script instead. It contains:
      *   - All active billing plans for THIS customer (embedded as JSON — no API call needed)
      *   - Customer branding: company name, WiFi SSID
      *   - Payment gateway status: whether customer has configured ClickPesa credentials
@@ -27,7 +27,10 @@ class StandalonePortalHtmlService
      * They are used server-side by the VPS API which the JS calls. The HTML only
      * embeds a label indicating which payment networks are accepted.
      */
-    public function generateForRouter(Router $router, User $customer): string
+    /**
+     * @return array<string, mixed>
+     */
+    public function viewDataForRouter(Router $router, User $customer): array
     {
         $plans = CustomerBillingPlan::where('customer_id', $customer->id)
             ->where('is_active', true)
@@ -50,7 +53,7 @@ class StandalonePortalHtmlService
 
         $hasCustomGateway = $gateway instanceof CustomerPaymentGateway && $gateway->isConfigured();
 
-        return view('hotspot.standalone-login', [
+        return [
             'vpsUrl' => rtrim(config('app.url'), '/'),
             'routerId' => $router->id,
             'wifiName' => $router->hotspot_ssid ?: $router->name ?: 'WiFi',
@@ -58,7 +61,15 @@ class StandalonePortalHtmlService
             'hasCustomGateway' => $hasCustomGateway,
             'plansJson' => $plans->toJson(JSON_UNESCAPED_UNICODE),
             'generatedAt' => now()->toDateTimeString(),
-        ])->render();
+            'portalToken' => $router->local_portal_token ?? '',
+            'portalBuild' => $router->portal_bundle_version ?: (string) config('skymanager.portal_bundle_version'),
+            'bundleMode' => false,
+        ];
+    }
+
+    public function generateForRouter(Router $router, User $customer): string
+    {
+        return view('hotspot.standalone-login', $this->viewDataForRouter($router, $customer))->render();
     }
 
     /**

@@ -4,39 +4,28 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\CustomerBillingPlan;
+use App\Models\CustomerVoucher;
 use App\Models\HotspotPayment;
 use App\Models\Router;
-use App\Models\Voucher;
+use App\Services\HotspotPaymentAuthorizationService;
 use App\Services\MikrotikApiService;
 use App\Services\PaymentGatewayService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
  * Local Captive Portal API
  *
- * All endpoints are FULLY PUBLIC — called from the MikroTik-served login.html
- * before the client device has internet access. Security is enforced via:
- *   - router_id ownership validation on every write endpoint
- *   - plan ownership verification against the router's customer
- *   - per-route rate limiting (see routes/api.php)
- *   - duplicate-payment guard on initiate
+ * Public endpoints used from MikroTik-served login.html inside the walled garden.
+ * Security: router ownership, plan ownership, optional per-router portal token (after
+ * HTML regeneration), rate limits (routes), idempotent payment finalization.
  */
 class LocalPortalController extends Controller
 {
-    // ══════════════════════════════════════════════════════════════════════
-    // Group 1 – Portal Entry
-    // ══════════════════════════════════════════════════════════════════════
-
-    /**
-     * GET /api/local-portal/packages?router_id={id}
-     *
-     * Returns active billing plans for the customer who owns this router.
-     * Called on portal page load to populate the plan grid.
-     */
     public function packages(Request $request): JsonResponse
     {
         $router = $this->resolveRouter((string) $request->query('router_id', ''));
@@ -60,25 +49,17 @@ class LocalPortalController extends Controller
 
         return response()->json([
             'router_name' => $router->hotspot_ssid ?: $router->name,
+            'portal_bundle_version' => $router->portal_bundle_version,
             'plans' => $plans,
         ]);
     }
 
-    /**
-     * POST /api/local-portal/session/start
-     *
-     * Records a portal session start for a device hitting the captive portal.
-     * Validates router existence and returns router metadata to the JS app.
-     * Called once when the portal page initialises.
-     *
-     * Body: { router_id, mac, ip }
-     */
     public function startSession(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'router_id' => ['required', 'string'],
-            'mac' => ['required', 'string'],
-            'ip' => ['nullable', 'string'],
+            'router_id' => ['required', 'string', 'max:32'],
+            'mac' => ['required', 'string', 'max:32'],
+            'ip' => ['nullable', 'string', 'max:45'],
         ]);
 
         $router = $this->resolveRouter($data['router_id']);
@@ -88,6 +69,7 @@ class LocalPortalController extends Controller
         }
 
         Log::info('LocalPortal: session started', [
+            'router_id' => $router->id,
             'router' => $router->name,
             'mac' => $data['mac'],
             'ip' => $data['ip'] ?? null,
@@ -101,23 +83,11 @@ class LocalPortalController extends Controller
         ]);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // Group 2 – Payment
-    // ══════════════════════════════════════════════════════════════════════
-
-    /**
-     * POST /api/local-portal/payment/initiate
-     *
-     * Initiates a ClickPesa USSD-push payment for a selected plan.
-     * Returns a reference the browser polls to track status.
-     *
-     * Body: { router_id, plan_id, phone, mac, ip }
-     */
     public function initiatePayment(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'router_id' => ['required', 'string'],
-            'plan_id' => ['required', 'string'],
+            'router_id' => ['required', 'string', 'max:32'],
+            'plan_id' => ['required', 'string', 'max:32'],
             'phone' => ['required', 'string', 'min:9', 'max:15'],
             'mac' => ['required', 'string', 'regex:/^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/'],
             'ip' => ['required', 'ip'],
@@ -126,18 +96,27 @@ class LocalPortalController extends Controller
         $router = $this->resolveRouter($data['router_id']);
 
         if (! $router) {
-            return $this->routerNotFound();
+            return response()->json([
+                'error' => 'Router not found or not yet claimed.',
+                'code' => 'router_not_found',
+            ], 404);
         }
 
-        $plan = $this->resolvePlan($data['plan_id'], $router->user_id);
+        if ($response = $this->rejectUnlessPortalTokenMatches($request, $router)) {
+            return $response;
+        }
+
+        $plan = $this->resolvePlan($data['plan_id'], (string) $router->user_id);
 
         if (! $plan) {
-            return response()->json(['error' => 'Plan not found or inactive.'], 404);
+            return response()->json([
+                'error' => 'Plan not found or inactive for this hotspot.',
+                'code' => 'plan_not_found',
+            ], 404);
         }
 
         $mac = strtoupper($data['mac']);
 
-        // Guard: block duplicate pending payments for the same device + plan.
         $existing = HotspotPayment::where('client_mac', $mac)
             ->where('plan_id', $plan->id)
             ->where('status', 'pending')
@@ -148,15 +127,19 @@ class LocalPortalController extends Controller
             return response()->json([
                 'reference' => $existing->reference,
                 'status' => 'pending',
+                'code' => 'payment_already_pending',
                 'message' => 'A payment is already pending. Check your phone for the USSD prompt.',
             ]);
         }
 
         $reference = 'HP-'.strtoupper(Str::random(12));
 
+        $gatewayService = PaymentGatewayService::forRouter($router);
+
         $payment = HotspotPayment::create([
             'router_id' => $router->id,
             'plan_id' => $plan->id,
+            'customer_payment_gateway_id' => $gatewayService->activeGatewayId(),
             'client_mac' => $mac,
             'client_ip' => $data['ip'],
             'phone' => $data['phone'],
@@ -166,125 +149,150 @@ class LocalPortalController extends Controller
         ]);
 
         try {
-            $result = PaymentGatewayService::forRouter($router)
-                ->initiatePayment($data['phone'], (float) $plan->price, $reference);
+            $result = $gatewayService->initiatePayment($data['phone'], (float) $plan->price, $reference);
 
             $payment->update(['transaction_id' => $result['transactionId']]);
 
             Log::info('LocalPortal: payment initiated', [
                 'reference' => $reference,
-                'router' => $router->name,
+                'router_id' => $router->id,
                 'plan' => $plan->name,
-                'phone' => $data['phone'],
             ]);
 
             return response()->json([
                 'reference' => $reference,
                 'status' => 'pending',
+                'code' => 'initiated',
                 'message' => 'USSD push sent. Enter your PIN on your phone.',
             ]);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $payment->update(['status' => 'failed']);
 
             Log::error('LocalPortal: payment initiation failed', [
                 'reference' => $reference,
+                'router_id' => $router->id,
                 'error' => $e->getMessage(),
             ]);
 
-            return response()->json(['error' => 'Payment initiation failed: '.$e->getMessage()], 502);
+            return response()->json([
+                'error' => $e->getMessage(),
+                'code' => 'provider_initiate_failed',
+            ], 502);
         }
     }
 
-    /**
-     * GET /api/local-portal/payment/status/{reference}
-     *
-     * Polls payment status. Verifies with ClickPesa on each poll and
-     * automatically triggers MikroTik authorization on first success.
-     */
     public function paymentStatus(string $reference): JsonResponse
     {
         if (! preg_match('/^HP-[A-Z0-9]{12}$/', $reference)) {
-            return response()->json(['error' => 'Invalid reference format.'], 422);
+            return response()->json([
+                'error' => 'Invalid payment reference format.',
+                'code' => 'invalid_reference',
+            ], 422);
         }
 
         $payment = HotspotPayment::where('reference', $reference)->first();
 
         if (! $payment) {
-            return response()->json(['error' => 'Payment session not found.'], 404);
+            return response()->json([
+                'error' => 'Payment session not found.',
+                'code' => 'payment_not_found',
+            ], 404);
         }
 
         if ($payment->status === 'authorized') {
-            return response()->json(['status' => 'authorized']);
+            return response()->json([
+                'status' => 'authorized',
+                'authorization' => 'complete',
+            ]);
         }
 
         if ($payment->status === 'failed') {
             return response()->json([
                 'status' => 'failed',
+                'authorization' => 'failed',
                 'message' => 'Payment did not complete. Please try again.',
             ]);
         }
 
-        if (in_array($payment->status, ['pending', 'success'], true) && $payment->transaction_id) {
+        if ($payment->transaction_id && in_array($payment->status, ['pending', 'success'], true)) {
             try {
-                $result = PaymentGatewayService::forRouter($payment->router)
+                $result = PaymentGatewayService::forHotspotPayment($payment)
                     ->verifyTransaction($payment->transaction_id);
 
-                if ($result['status'] === 'success' && $payment->status !== 'authorized') {
-                    if ($payment->status === 'pending') {
-                        $payment->update(['status' => 'success']);
-                    }
-                    $this->authorizeOnRouter($payment);
+                if ($result['status'] === 'success') {
+                    HotspotPayment::markProviderConfirmedByReference($reference, $payment->transaction_id);
                     $payment->refresh();
                 } elseif ($result['status'] === 'failed') {
-                    $payment->update(['status' => 'failed']);
+                    DB::transaction(function () use ($reference) {
+                        /** @var HotspotPayment|null $locked */
+                        $locked = HotspotPayment::where('reference', $reference)->lockForUpdate()->first();
+                        if ($locked && $locked->status === 'pending') {
+                            $locked->update(['status' => 'failed']);
+                        }
+                    });
+                    $payment->refresh();
                 }
-            } catch (\Exception $e) {
-                Log::warning('LocalPortal: status poll error', [
+            } catch (\Throwable $e) {
+                Log::warning('LocalPortal: status poll verify failed', [
                     'reference' => $reference,
                     'error' => $e->getMessage(),
                 ]);
             }
         }
 
-        return response()->json(['status' => $payment->fresh()->status]);
+        $fresh = $payment->fresh();
+
+        if ($fresh->status === 'success') {
+            app(HotspotPaymentAuthorizationService::class)->dispatchAuthorization($fresh);
+
+            return response()->json([
+                'status' => 'success',
+                'authorization' => 'pending',
+                'message' => 'Payment confirmed. Activating internet access on the router…',
+                'last_authorize_error' => $fresh->last_authorize_error,
+            ]);
+        }
+
+        return response()->json([
+            'status' => $fresh->status,
+            'authorization' => $fresh->status === 'authorized' ? 'complete' : 'pending',
+            'last_authorize_error' => $fresh->last_authorize_error,
+        ]);
     }
 
-    /**
-     * POST /api/local-portal/payment/callback
-     *
-     * ClickPesa webhook. Must be completely public (no throttle middleware).
-     * Updates payment status and triggers MikroTik authorization immediately.
-     */
     public function paymentCallback(Request $request): JsonResponse
     {
+        if (! $this->isValidClickPesaWebhook($request)) {
+            Log::warning('LocalPortal: ClickPesa callback rejected (signature)', [
+                'ip' => $request->ip(),
+            ]);
+
+            return response()->json(['received' => false, 'code' => 'invalid_signature'], 401);
+        }
+
         $payload = $request->all();
 
         Log::info('LocalPortal: ClickPesa callback received', ['payload' => $payload]);
 
         $reference = $payload['orderReference'] ?? $payload['reference'] ?? null;
 
-        if (! $reference) {
+        if (! $reference || ! is_string($reference)) {
             return response()->json(['received' => true]);
         }
 
-        $payment = HotspotPayment::where('reference', $reference)->first();
+        $clickpesaStatus = strtoupper((string) ($payload['status'] ?? ''));
 
-        if (! $payment) {
-            Log::warning('LocalPortal: callback for unknown reference', ['reference' => $reference]);
-
-            return response()->json(['received' => true]);
-        }
-
-        $clickpesaStatus = strtoupper($payload['status'] ?? '');
-
-        if (in_array($clickpesaStatus, ['SUCCESS', 'SETTLED'], true) && $payment->status === 'pending') {
-            $payment->update([
-                'status' => 'success',
-                'transaction_id' => $payload['id'] ?? $payment->transaction_id,
-            ]);
-            $this->authorizeOnRouter($payment);
-        } elseif ($clickpesaStatus === 'FAILED' && $payment->status === 'pending') {
-            $payment->update(['status' => 'failed']);
+        if (in_array($clickpesaStatus, ['SUCCESS', 'SETTLED'], true)) {
+            $tid = isset($payload['id']) ? (string) $payload['id'] : null;
+            HotspotPayment::markProviderConfirmedByReference($reference, $tid);
+        } elseif ($clickpesaStatus === 'FAILED') {
+            DB::transaction(function () use ($reference) {
+                /** @var HotspotPayment|null $locked */
+                $locked = HotspotPayment::where('reference', $reference)->lockForUpdate()->first();
+                if ($locked && $locked->status === 'pending') {
+                    $locked->update(['status' => 'failed']);
+                }
+            });
 
             Log::info('LocalPortal: payment failed via callback', ['reference' => $reference]);
         }
@@ -292,19 +300,6 @@ class LocalPortalController extends Controller
         return response()->json(['received' => true]);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // Group 3 – MikroTik Authorization
-    // ══════════════════════════════════════════════════════════════════════
-
-    /**
-     * POST /api/local-portal/mikrotik/authorize
-     *
-     * Explicit authorization endpoint. Called by JS as a fallback when the
-     * payment has confirmed (status = success) but auto-authorization inside
-     * paymentStatus() failed or has not been retried yet.
-     *
-     * Body: { reference }
-     */
     public function authorizeUser(Request $request): JsonResponse
     {
         $data = $request->validate([
@@ -314,16 +309,30 @@ class LocalPortalController extends Controller
         $payment = HotspotPayment::where('reference', $data['reference'])->first();
 
         if (! $payment) {
-            return response()->json(['error' => 'Payment session not found.'], 404);
+            return response()->json([
+                'error' => 'Payment session not found.',
+                'code' => 'payment_not_found',
+            ], 404);
+        }
+
+        $payment->loadMissing('router');
+
+        if ($response = $this->rejectUnlessPortalTokenMatches($request, $payment->router)) {
+            return $response;
         }
 
         if ($payment->status === 'authorized') {
-            return response()->json(['status' => 'authorized', 'message' => 'Already authorized.']);
+            return response()->json([
+                'status' => 'authorized',
+                'authorization' => 'complete',
+                'message' => 'Already authorized.',
+            ]);
         }
 
         if ($payment->status === 'pending') {
             return response()->json([
                 'status' => 'pending',
+                'authorization' => 'pending',
                 'message' => 'Payment is still pending. Complete the USSD prompt first.',
             ], 202);
         }
@@ -331,43 +340,44 @@ class LocalPortalController extends Controller
         if ($payment->status === 'failed') {
             return response()->json([
                 'status' => 'failed',
+                'authorization' => 'failed',
                 'message' => 'Payment failed. Please initiate a new payment.',
             ], 402);
         }
 
-        // status = 'success' — authorize on MikroTik now
-        $ok = $this->authorizeOnRouter($payment);
-        $payment->refresh();
-
-        if ($ok) {
-            return response()->json(['status' => 'authorized']);
+        if ($payment->status !== 'success') {
+            return response()->json([
+                'status' => $payment->status,
+                'code' => 'unexpected_payment_state',
+            ], 409);
         }
 
+        $authorization = app(HotspotPaymentAuthorizationService::class);
+
+        if ($authorization->authorizePayment($payment->fresh())) {
+            return response()->json([
+                'status' => 'authorized',
+                'authorization' => 'complete',
+            ]);
+        }
+
+        $authorization->dispatchAuthorization($payment->fresh());
+
         return response()->json([
-            'status' => $payment->status,
-            'message' => 'Authorization is processing. Retry in a few seconds.',
+            'status' => 'success',
+            'authorization' => 'pending',
+            'message' => 'Router is applying access. This may take a minute if the link is busy.',
+            'last_authorize_error' => $payment->fresh()->last_authorize_error,
         ], 202);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // Group 4 – Voucher Redemption
-    // ══════════════════════════════════════════════════════════════════════
-
-    /**
-     * POST /api/local-portal/voucher/redeem
-     *
-     * Validates and redeems a prepaid voucher code for a device.
-     * On success, authorizes the device on MikroTik using the plan's parameters.
-     *
-     * Body: { router_id, code, mac, ip }
-     */
     public function redeemVoucher(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'router_id' => ['required', 'string'],
-            'code' => ['required', 'string', 'max:32'],
+            'router_id' => ['required', 'string', 'max:32'],
+            'code' => ['required', 'string', 'max:40'],
             'mac' => ['required', 'string', 'regex:/^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/'],
-            'ip' => ['nullable', 'string'],
+            'ip' => ['nullable', 'string', 'max:45'],
         ]);
 
         $router = $this->resolveRouter($data['router_id']);
@@ -376,22 +386,29 @@ class LocalPortalController extends Controller
             return $this->routerNotFound();
         }
 
+        if ($response = $this->rejectUnlessPortalTokenMatches($request, $router)) {
+            return $response;
+        }
+
         $mac = strtoupper($data['mac']);
 
         try {
-            $voucher = Voucher::redeem($data['code'], $mac);
+            $voucher = CustomerVoucher::redeemForRouter($data['code'], $mac, $router);
         } catch (ModelNotFoundException) {
-            return response()->json(['error' => 'Voucher code not found. Please check and try again.'], 404);
-        } catch (\Exception $e) {
-            return response()->json(['error' => $e->getMessage()], 422);
+            return response()->json([
+                'error' => 'Voucher code not found.',
+                'code' => 'voucher_not_found',
+            ], 404);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+                'code' => 'voucher_invalid',
+            ], 422);
         }
 
         $plan = $voucher->plan;
-
-        $profileName = 'vchr-'.Str::slug($plan->name, '-');
-        $rateLimit = ($plan->upload_limit && $plan->download_limit)
-            ? $plan->upload_limit.'k/'.$plan->download_limit.'k'
-            : null;
+        $profileName = 'sky-'.Str::slug($plan->name, '-');
+        $rateLimit = $plan->mikrotikRateLimit();
 
         try {
             $mikrotik = app(MikrotikApiService::class);
@@ -401,31 +418,35 @@ class LocalPortalController extends Controller
                 $profileName,
                 $plan->duration_minutes,
                 $plan->data_quota_mb,
-                $rateLimit
+                $rateLimit !== '0/0' ? $rateLimit : null
             );
             $mikrotik->disconnect();
 
-            Log::info('LocalPortal: voucher redeemed + authorized', [
-                'router' => $router->name,
+            $router->forceFill([
+                'last_api_success_at' => now(),
+                'last_api_error' => null,
+            ])->save();
+
+            Log::info('LocalPortal: customer voucher redeemed', [
+                'router_id' => $router->id,
                 'mac' => $mac,
-                'code' => strtoupper(trim($data['code'])),
                 'plan' => $plan->name,
             ]);
-        } catch (\Exception $e) {
-            Log::error('LocalPortal: MikroTik auth failed after voucher redeem', [
-                'router' => $router->name,
+        } catch (\Throwable $e) {
+            Log::error('LocalPortal: MikroTik failed after customer voucher redeem', [
+                'router_id' => $router->id,
                 'mac' => $mac,
                 'error' => $e->getMessage(),
             ]);
 
-            // Voucher is already marked as used. Return partial success so the
-            // user knows the code was valid — they may need to reconnect manually.
             return response()->json([
-                'status' => 'authorized',
+                'status' => 'pending',
+                'code' => 'router_authorize_pending',
                 'plan_name' => $plan->name,
                 'duration_minutes' => $plan->duration_minutes,
-                'message' => 'Voucher accepted! Internet access will activate within a few seconds.',
-            ]);
+                'message' => 'Voucher accepted. Access will activate shortly — please stay on Wi‑Fi.',
+                'error_detail' => $e->getMessage(),
+            ], 202);
         }
 
         return response()->json([
@@ -436,16 +457,9 @@ class LocalPortalController extends Controller
         ]);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // Private helpers
-    // ══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Resolve a Router by ID, ensuring it is claimed by a customer.
-     */
     private function resolveRouter(string $routerId): ?Router
     {
-        if (! $routerId) {
+        if ($routerId === '') {
             return null;
         }
 
@@ -454,9 +468,6 @@ class LocalPortalController extends Controller
         return ($router && $router->user_id) ? $router : null;
     }
 
-    /**
-     * Resolve an active CustomerBillingPlan owned by the given customer.
-     */
     private function resolvePlan(string $planId, string $customerId): ?CustomerBillingPlan
     {
         return CustomerBillingPlan::where('id', $planId)
@@ -465,70 +476,54 @@ class LocalPortalController extends Controller
             ->first();
     }
 
-    /**
-     * Standard 404 JSON for unclaimed / missing router.
-     */
     private function routerNotFound(): JsonResponse
     {
-        return response()->json(['error' => 'Router not found or not yet claimed.'], 404);
+        return response()->json([
+            'error' => 'Router not found or not yet claimed.',
+            'code' => 'router_not_found',
+        ], 404);
     }
 
     /**
-     * Connect to MikroTik via ZTP credentials and add a hotspot user with
-     * MAC binding for the purchased plan. Returns true on success.
-     * Errors are logged — the polling endpoint will retry on the next poll.
+     * When a router has a portal token (set on standalone HTML download), mutating
+     * endpoints require header X-SKY-Portal-Token. Routers without a token stay
+     * backward-compatible until the customer regenerates login.html.
      */
-    private function authorizeOnRouter(HotspotPayment $payment): bool
+    private function rejectUnlessPortalTokenMatches(Request $request, ?Router $router): ?JsonResponse
     {
-        $router = $payment->router;
-        $plan = $payment->plan;
-
-        if (! $router || ! $plan) {
-            Log::error('LocalPortal: missing router or plan for authorization', [
-                'payment_id' => $payment->id,
-            ]);
-
-            return false;
+        if (! $router || ! $router->local_portal_token) {
+            return null;
         }
 
-        $profileName = 'sky-'.Str::slug($plan->name, '-');
-        $rateLimit = $plan->mikrotikRateLimit();
-        $expiresAt = now()->addMinutes($plan->duration_minutes);
+        $sent = (string) $request->header('X-SKY-Portal-Token', '');
 
-        try {
-            $mikrotik = app(MikrotikApiService::class);
-            $mikrotik->connectZtp($router);
-            $mikrotik->authorizeHotspotMac(
-                $payment->client_mac,
-                $profileName,
-                $plan->duration_minutes,
-                $plan->data_quota_mb,
-                $rateLimit
-            );
-            $mikrotik->disconnect();
+        if ($sent === '' || ! hash_equals($router->local_portal_token, $sent)) {
+            return response()->json([
+                'error' => 'Invalid or missing portal token. Refresh the hotspot bundle or regenerate the MikroTik script from My Routers / My Plans.',
+                'code' => 'portal_token_mismatch',
+            ], 403);
+        }
 
-            $payment->update([
-                'status' => 'authorized',
-                'authorized_at' => now(),
-                'expires_at' => $expiresAt,
-            ]);
+        return null;
+    }
 
-            Log::info('LocalPortal: client authorized on router', [
-                'mac' => $payment->client_mac,
-                'router' => $router->name,
-                'plan' => $plan->name,
-                'expires' => $expiresAt->toDateTimeString(),
-            ]);
+    private function isValidClickPesaWebhook(Request $request): bool
+    {
+        $secret = (string) config('services.clickpesa.webhook_secret', '');
 
+        if ($secret === '') {
             return true;
-        } catch (\Exception $e) {
-            Log::error('LocalPortal: MikroTik authorization failed', [
-                'payment_id' => $payment->id,
-                'router' => $router->name,
-                'error' => $e->getMessage(),
-            ]);
+        }
 
+        $headerName = (string) config('services.clickpesa.webhook_signature_header', 'X-ClickPesa-Signature');
+        $signature = (string) $request->header($headerName, '');
+
+        if ($signature === '') {
             return false;
         }
+
+        $expected = hash_hmac('sha256', $request->getContent(), $secret);
+
+        return hash_equals($expected, $signature);
     }
 }

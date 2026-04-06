@@ -24,6 +24,29 @@ function makePlan(User $customer, array $attrs = []): CustomerBillingPlan
     ], $attrs));
 }
 
+// ── Plan form: Mbps → kbps persistence ────────────────────────────────────────
+
+test('saving a new plan converts Mbps fields to kbps in the database', function () {
+    $customer = Customer::factory()->create();
+
+    Livewire::actingAs($customer)
+        ->test(MyPlans::class)
+        ->call('openCreateModal')
+        ->set('name', 'Mbps Plan')
+        ->set('price', '100')
+        ->set('durationMinutes', '1')
+        ->set('durationUnit', 'hours')
+        ->set('uploadSpeedMbps', '5')
+        ->set('downloadSpeedMbps', '10')
+        ->call('savePlan');
+
+    $plan = $customer->billingPlans()->where('name', 'Mbps Plan')->first();
+
+    expect($plan)->not->toBeNull()
+        ->and($plan->upload_speed_kbps)->toBe((int) round(5 * 1024))
+        ->and($plan->download_speed_kbps)->toBe((int) round(10 * 1024));
+});
+
 // ── "Add Plan" button ─────────────────────────────────────────────────────────
 
 test('Add Plan button opens the create form modal', function () {
@@ -47,9 +70,51 @@ test('My Portal URL button opens the portal URL modal', function () {
         ->assertSet('showPortalModal', true);
 });
 
-// ── "Generate Login.html" / openDownloadModal ─────────────────────────────────
+// ── Hotspot bundle (recommended) ─────────────────────────────────────────────
 
-test('Generate Login.html shows warning notify when customer has no routers', function () {
+test('Hotspot bundle flow shows warning notify when customer has no routers', function () {
+    $customer = Customer::factory()->create();
+
+    Livewire::actingAs($customer)
+        ->test(MyPlans::class)
+        ->call('openHotspotBundleFlow')
+        ->assertDispatched('notify');
+});
+
+test('Hotspot bundle flow redirects when customer has exactly one router', function () {
+    $customer = Customer::factory()->create();
+    $router = Router::factory()->create(['user_id' => $customer->id]);
+
+    Livewire::actingAs($customer)
+        ->test(MyPlans::class)
+        ->call('openHotspotBundleFlow')
+        ->assertRedirect(route('customer.plans.hotspot-bundle', ['routerId' => $router->id], absolute: false));
+});
+
+test('Hotspot bundle flow opens router picker when customer has multiple routers', function () {
+    $customer = Customer::factory()->create();
+    Router::factory()->create(['user_id' => $customer->id]);
+    Router::factory()->create(['user_id' => $customer->id]);
+
+    Livewire::actingAs($customer)
+        ->test(MyPlans::class)
+        ->call('openHotspotBundleFlow')
+        ->assertSet('showBundleRouterModal', true);
+});
+
+test('goToHotspotBundleForRouter redirects to bundle page', function () {
+    $customer = Customer::factory()->create();
+    $router = Router::factory()->create(['user_id' => $customer->id]);
+
+    Livewire::actingAs($customer)
+        ->test(MyPlans::class)
+        ->call('goToHotspotBundleForRouter', $router->id)
+        ->assertRedirect(route('customer.plans.hotspot-bundle', ['routerId' => $router->id], absolute: false));
+});
+
+// ── Legacy single-file download / openDownloadModal ───────────────────────────
+
+test('Legacy portal download shows warning notify when customer has no routers', function () {
     $customer = Customer::factory()->create();
 
     Livewire::actingAs($customer)
@@ -58,7 +123,7 @@ test('Generate Login.html shows warning notify when customer has no routers', fu
         ->assertDispatched('notify');
 });
 
-test('Generate Login.html redirects to a signed URL when customer has exactly one router', function () {
+test('Legacy portal download redirects to a signed URL when customer has exactly one router', function () {
     $customer = Customer::factory()->create();
     Router::factory()->create(['user_id' => $customer->id]);
 
@@ -68,7 +133,7 @@ test('Generate Login.html redirects to a signed URL when customer has exactly on
         ->assertRedirect();
 });
 
-test('Generate Login.html opens router-selection modal when customer has multiple routers', function () {
+test('Legacy portal download opens router-selection modal when customer has multiple routers', function () {
     $customer = Customer::factory()->create();
     Router::factory()->create(['user_id' => $customer->id]);
     Router::factory()->create(['user_id' => $customer->id]);
@@ -167,11 +232,14 @@ test('download route returns HTML file for router owner with valid signed URL', 
         ['routerId' => $router->id]
     );
 
-    $this->actingAs($customer)
-        ->get($url)
+    $response = $this->actingAs($customer)
+        ->get($url);
+
+    $response
         ->assertOk()
-        ->assertHeader('Content-Disposition')
         ->assertHeader('Content-Type', 'text/html; charset=UTF-8');
+
+    expect($response->headers->get('Content-Disposition'))->toContain('skymanager-legacy-single-file');
 });
 
 test('download route returns 403 with no signature', function () {

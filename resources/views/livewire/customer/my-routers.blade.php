@@ -71,12 +71,21 @@
                                 <p class="text-xs text-gray-500 dark:text-neutral-400">{{ $router->hotspot_ssid }}</p>
                             </div>
                         </div>
-                        <flux:badge
-                            color="{{ $router->is_online ? 'green' : 'zinc' }}"
-                            size="sm"
-                        >
-                            {{ $router->is_online ? __('Online') : __('Offline') }}
-                        </flux:badge>
+                        <div class="flex flex-col items-end gap-1">
+                            <flux:badge
+                                color="{{ $router->is_online ? 'green' : 'zinc' }}"
+                                size="sm"
+                            >
+                                {{ $router->is_online ? __('Online') : __('Offline') }}
+                            </flux:badge>
+                            <flux:badge
+                                color="{{ $this->onboardingBadgeVariant($router->onboarding_status) }}"
+                                size="sm"
+                                title="{{ $router->last_error_message }}"
+                            >
+                                {{ \App\Support\RouterOnboarding::label($router->onboarding_status) }}
+                            </flux:badge>
+                        </div>
                     </div>
 
                     {{-- Card Body --}}
@@ -116,10 +125,70 @@
                                 <p class="font-mono text-xs text-gray-600 dark:text-neutral-400 mt-0.5">{{ $router->mac_address }}</p>
                             </div>
                         @endif
+                        @if($router->last_error_message && in_array($router->onboarding_status, ['error', 'cred_mismatch', 'offline', 'bundle_mismatch'], true))
+                            <div class="rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-100 dark:border-red-900/50 px-3 py-2">
+                                <p class="text-[10px] font-semibold text-red-700 dark:text-red-300 uppercase tracking-wide">{{ __('Last issue') }}</p>
+                                <p class="text-xs text-red-800 dark:text-red-200 mt-1 line-clamp-3">{{ $router->last_error_message }}</p>
+                            </div>
+                        @endif
+
+                        @php
+                            $healthOverall = $router->health_snapshot['overall'] ?? null;
+                        @endphp
+                        @if($healthOverall)
+                            <div class="flex flex-wrap gap-1.5 text-[10px] text-zinc-600 dark:text-zinc-400">
+                                <span class="font-medium text-zinc-500 dark:text-zinc-500">{{ __('Health') }}:</span>
+                                <span class="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 font-mono uppercase">{{ $healthOverall }}</span>
+                                @if($router->health_evaluated_at)
+                                    <span class="text-zinc-400">· {{ $router->health_evaluated_at->diffForHumans() }}</span>
+                                @endif
+                            </div>
+                        @endif
+
+                        <div class="rounded-lg bg-sky-50/80 dark:bg-sky-900/10 border border-sky-100 dark:border-sky-900/40 px-3 py-2">
+                            <p class="text-[10px] font-semibold text-sky-700 dark:text-sky-300 uppercase tracking-wide">{{ __('Portal bundle') }}</p>
+                            <p class="text-xs text-gray-700 dark:text-neutral-300 mt-1">
+                                {{ __('Version') }}: <span class="font-mono">{{ $router->portal_bundle_version ?? '—' }}</span>
+                                @if($router->portal_bundle_hash)
+                                    <span class="text-gray-400 dark:text-neutral-500"> · </span>
+                                    <span class="font-mono text-[10px] text-gray-500 dark:text-neutral-400" title="{{ $router->portal_bundle_hash }}">{{ \Illuminate\Support\Str::limit($router->portal_bundle_hash, 14, '…') }}</span>
+                                @endif
+                            </p>
+                            @if(config('skymanager.portal_bundle_version') && (string)($router->portal_bundle_version ?? '') !== (string)config('skymanager.portal_bundle_version'))
+                                <p class="text-[10px] text-amber-700 dark:text-amber-400 mt-1">{{ __('App has a newer bundle version — regenerate script after refreshing bundle.') }}</p>
+                            @endif
+                        </div>
+
+                        <div class="rounded-lg border border-zinc-100 dark:border-neutral-700 bg-zinc-50/50 dark:bg-neutral-900/30 px-3 py-2 space-y-1">
+                            <p class="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">{{ __('Readiness (at a glance)') }}</p>
+                            <ul class="text-xs text-zinc-600 dark:text-zinc-300 space-y-0.5">
+                                <li class="flex gap-1.5">
+                                    <span class="text-zinc-400">·</span>
+                                    {{ $router->onboarding_status === \App\Support\RouterOnboarding::READY ? __('Payments / hotspot: ready') : __('Payments / hotspot: not fully ready yet') }}
+                                </li>
+                                <li class="flex gap-1.5">
+                                    <span class="text-zinc-400">·</span>
+                                    {{ ($router->bundle_deployment_mode === 'bundle' && $router->portal_bundle_hash) ? __('Captive portal: bundle mode configured in SKYmanager') : __('Captive portal: finish bundle + script on router') }}
+                                </li>
+                                <li class="flex gap-1.5">
+                                    <span class="text-zinc-400">·</span>
+                                    {{ ($router->vpn_connected || $router->last_tunnel_ok) ? __('Tunnel: last check OK') : __('Tunnel: not verified or down') }}
+                                </li>
+                            </ul>
+                        </div>
                     </div>
 
                     {{-- Card Actions --}}
                     <div class="px-5 py-3 bg-gray-50 dark:bg-neutral-700/30 border-t border-gray-100 dark:border-neutral-700 flex flex-wrap gap-2">
+                        <flux:button :href="route('customer.client-sessions').'?router='.urlencode($router->id)" variant="ghost" size="sm" icon="users" class="flex-1" wire:navigate>
+                            {{ __('Clients') }}
+                        </flux:button>
+                        <flux:button :href="route('customer.plans.hotspot-bundle', ['routerId' => $router->id])" variant="ghost" size="sm" icon="folder-open" class="flex-1" wire:navigate>
+                            {{ __('Bundle') }}
+                        </flux:button>
+                        <flux:button wire:click="regeneratePortalBundle('{{ $router->id }}')" variant="ghost" size="sm" icon="arrow-path" class="flex-1">
+                            {{ __('Refresh bundle') }}
+                        </flux:button>
                         <flux:button wire:click="viewRouter('{{ $router->id }}')" variant="ghost" size="sm" icon="eye" class="flex-1">
                             {{ __('Details') }}
                         </flux:button>
@@ -181,6 +250,37 @@
                     @endif
                 </div>
 
+                <div class="rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50/80 dark:bg-zinc-900/20 px-4 py-3 text-sm space-y-2">
+                    <p class="text-xs font-medium text-zinc-700 dark:text-zinc-200">{{ __('Onboarding') }}</p>
+                    <p class="text-xs text-zinc-600 dark:text-zinc-400">{{ \App\Support\RouterOnboarding::label($this->selectedRouter->onboarding_status) }}</p>
+                    @if($this->selectedRouter->last_error_message)
+                        <p class="text-xs text-red-700 dark:text-red-300 whitespace-pre-wrap">{{ $this->selectedRouter->last_error_message }}</p>
+                    @endif
+                    @if($this->selectedRouter->onboarding_warnings && count($this->selectedRouter->onboarding_warnings))
+                        <p class="text-[10px] font-medium text-zinc-500 uppercase">{{ __('Notes') }}</p>
+                        <ul class="text-xs text-zinc-600 dark:text-zinc-400 list-disc ps-4 space-y-0.5">
+                            @foreach(\Illuminate\Support\Arr::flatten($this->selectedRouter->onboarding_warnings) as $note)
+                                @if(is_string($note) && $note !== '')
+                                    <li>{{ $note }}</li>
+                                @endif
+                            @endforeach
+                        </ul>
+                    @endif
+                </div>
+
+                <div class="rounded-xl border border-sky-100 dark:border-sky-900/40 bg-sky-50/50 dark:bg-sky-900/10 px-4 py-3 text-sm space-y-2">
+                    <p class="text-xs font-medium text-sky-800 dark:text-sky-200">{{ __('Hotspot bundle (MikroTik)') }}</p>
+                    <p class="text-xs text-zinc-600 dark:text-zinc-400 font-mono break-all">{{ __('Folder') }}: {{ $this->selectedRouter->portal_folder_name ?? '—' }}</p>
+                    <p class="text-xs text-zinc-600 dark:text-zinc-400">{{ __('Hash') }}: {{ \Illuminate\Support\Str::limit($this->selectedRouter->portal_bundle_hash ?? '—', 48, '…') }}</p>
+                    <flux:button :href="route('customer.plans.hotspot-bundle', ['routerId' => $this->selectedRouter->id])" size="sm" variant="ghost" wire:navigate icon="folder-open">
+                        {{ __('Inspect / preview bundle') }}
+                    </flux:button>
+                </div>
+
+                <flux:button :href="route('customer.client-sessions').'?router='.urlencode($this->selectedRouter->id)" variant="primary" size="sm" wire:navigate icon="users" class="w-full">
+                    {{ __('View client sessions for this router') }}
+                </flux:button>
+
                 @if($this->selectedRouter->subscriptions->isNotEmpty())
                     <flux:separator />
                     <div>
@@ -205,7 +305,7 @@
                     <flux:button wire:click="openScriptModal('{{ $this->selectedRouter->id }}')" variant="primary" size="sm" icon="code-bracket">
                         {{ __('Generate Setup Script') }}
                     </flux:button>
-                    <flux:button wire:click="closeModal" variant="ghost">{{ __('Close') }}</flux:button>
+                    <flux:button wire:click="closeDetailModal" variant="ghost">{{ __('Close') }}</flux:button>
                 </div>
             </div>
         @endif
@@ -227,7 +327,7 @@
             <div class="rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-4 py-3 flex items-start gap-2">
                 <flux:icon name="exclamation-triangle" class="h-4 w-4 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
                 <p class="text-xs text-amber-700 dark:text-amber-400">
-                    {{ __('Open MikroTik Winbox or WebFig → New Terminal → paste the full script and press Enter.') }}
+                    {{ __('Open MikroTik Winbox or WebFig → New Terminal → paste the full script and press Enter. The script downloads a full hotspot folder (login, rlogin, md5.js, …) for reliable captive-portal popups.') }}
                 </p>
             </div>
 
@@ -262,9 +362,20 @@
                 </div>
             </div>
 
+            @if($this->selectedRouterId)
+                <div class="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/80 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                    {{ __('If the router no longer accepts API login, use “New API password” then paste the new script once. Old passwords are not rotated unless you ask.') }}
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <flux:button wire:click="openScriptModalWithNewApiPassword('{{ $this->selectedRouterId }}')" variant="ghost" size="sm" icon="key">
+                        {{ __('Regenerate with new API password') }}
+                    </flux:button>
+                </div>
+            @endif
+
             <div class="flex flex-col gap-2 sm:flex-row sm:justify-between sm:items-center pt-2">
                 <p class="text-xs text-zinc-500 dark:text-zinc-400">
-                    {{ __('After pasting, your router will connect to SKYmanager automatically within ~30 seconds.') }}
+                    {{ __('After pasting, wait for VPN and API checks. “Ready” appears only after the platform verifies your router — not immediately after claim.') }}
                 </p>
                 <div class="flex gap-2">
                     <flux:button wire:click="$set('showScriptModal', false)" variant="ghost" size="sm">{{ __('Close') }}</flux:button>

@@ -354,14 +354,19 @@ input{font-family:inherit}
 
   <div class="footer">
     {{ $companyName }} WiFi &bull; Powered by <a href="#">SKYmanager</a> &bull; &copy; {{ date('Y') }}<br>
-    <span style="font-size:10px;color:#cbd5e1">Generated {{ $generatedAt }}</span>
+    <span style="font-size:10px;color:#cbd5e1">Build {{ $portalBuild ?? '—' }} · Generated {{ $generatedAt }}</span>
   </div>
 </div>
 
+@if(!empty($bundleMode))
+<script src="md5.js"></script>
+@endif
 <script>
 // ── Embedded constants (set at generation time) ───────────────────────────────
 var VPS_URL   = '{{ $vpsUrl }}';
 var ROUTER_ID = '{{ $routerId }}';
+var PORTAL_TOKEN = @json($portalToken ?? '');
+var PORTAL_BUILD = @json($portalBuild ?? '');
 
 // ── Plans: embedded at generation time (no API call needed) ───────────────────
 var PLANS = {!! $plansJson !!};
@@ -539,9 +544,10 @@ function submitVoucher() {
       onAuthorized();
     }
   })
-  .catch(function () {
+  .catch(function (err) {
     setVoucherLoading(false);
-    showVoucherError('Network error — please check your connection and try again.');
+    var detail = (err && err.message) ? err.message : 'Network error — please check your connection and try again.';
+    showVoucherError(detail);
   });
 }
 
@@ -591,7 +597,8 @@ function submitPayment() {
   .catch(function (err) {
     btn.disabled    = false;
     btn.textContent = 'Pay Now — TZS ' + fmt(selectedPlan.price);
-    alert('Network error: ' + (err.message || 'Please check your connection.'));
+    var detail = (err && err.message) ? err.message : 'Request failed — check Wi‑Fi and try again.';
+    alert(detail);
   });
 }
 
@@ -709,11 +716,15 @@ function startBrowsing() {
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────
 function jsonHeaders() {
-  return {
+  var h = {
     'Content-Type':     'application/json',
     'Accept':           'application/json',
     'X-Requested-With': 'XMLHttpRequest'
   };
+  if (PORTAL_TOKEN) {
+    h['X-SKY-Portal-Token'] = PORTAL_TOKEN;
+  }
+  return h;
 }
 
 function okJson(r) {

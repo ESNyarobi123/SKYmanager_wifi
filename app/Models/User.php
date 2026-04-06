@@ -118,6 +118,9 @@ class User extends Authenticatable
     {
         return $this->paymentGateways()
             ->where('gateway', 'clickpesa')
+            ->orderByDesc('is_active')
+            ->orderByDesc('verified_at')
+            ->orderByDesc('updated_at')
             ->first();
     }
 

@@ -15,8 +15,7 @@
 <div id="hs-customer-sidebar"
      x-bind:class="open ? 'lg:w-[260px]' : 'lg:w-[68px]'"
      class="hs-overlay [--auto-close:lg] hs-overlay-open:translate-x-0 -translate-x-full transition-all duration-300 transform w-[260px] fixed inset-y-0 start-0 z-[60] flex flex-col overflow-hidden bg-[#0369a1] border-e border-sky-800/60
-            lg:translate-x-0 lg:end-auto lg:bottom-0
-            [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-sky-800/30 [&::-webkit-scrollbar-thumb]:bg-sky-600/60"
+            lg:translate-x-0 lg:end-auto lg:bottom-0"
      role="dialog" aria-label="Customer Sidebar">
 
     {{-- ── Logo ── --}}
@@ -46,7 +45,7 @@
     </div>
 
     {{-- ── Nav ── --}}
-    <nav class="flex-1 py-4 overflow-y-auto overflow-x-hidden transition-all duration-300"
+    <nav class="sidebar-scroll flex-1 min-h-0 overscroll-y-contain py-4 overflow-y-auto overflow-x-hidden transition-all duration-300 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
          x-bind:class="open ? 'px-3' : 'px-2'">
 
         @php

@@ -9,11 +9,15 @@ use Illuminate\Http\Response;
 class HotspotController extends Controller
 {
     /**
-     * Serve the local captive portal HTML page for a specific router.
+     * Serve a minimal local captive portal HTML page for a specific router (legacy).
+     *
+     * New deployments should use the multi-file hotspot bundle under
+     * `/hotspot-bundle/{router}/{file}?token=…` (see HotspotBundleService).
+     *
+     * Still supported for routers that only have flat `hotspot/login.html` from an older script.
      *
      * Called in two contexts:
-     *  1. During ZTP setup: MikroTik fetches via `/tool fetch ?router_id={id}` and
-     *     saves the result as hotspot/login.html on its flash storage.
+     *  1. Legacy MikroTik fetch: `/tool fetch` with `?router_id={id}` → `hotspot/login.html`.
      *  2. Direct browser access (fallback / testing).
      *
      * The returned HTML embeds the router_id and VPS URL as JS constants.

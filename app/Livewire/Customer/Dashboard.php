@@ -2,9 +2,12 @@
 
 namespace App\Livewire\Customer;
 
+use App\Models\HotspotPayment;
 use App\Models\Payment;
 use App\Models\Subscription;
 use App\Models\User;
+use App\Services\BusinessKpiService;
+use App\Services\CustomerClientSessionService;
 use Illuminate\Support\Facades\Auth;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
@@ -95,6 +98,40 @@ class Dashboard extends Component
     public function unreadNotificationCount(): int
     {
         return $this->customer->unreadNotifications()->count();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    #[Computed]
+    public function operationsSummary(): array
+    {
+        return app(BusinessKpiService::class)->customerOperationsSummary($this->customer);
+    }
+
+    #[Computed]
+    public function recentHotspotPayments()
+    {
+        $routerIds = $this->customer->routers()->pluck('id');
+        if ($routerIds->isEmpty()) {
+            return collect();
+        }
+
+        return HotspotPayment::query()
+            ->whereIn('router_id', $routerIds)
+            ->with(['router', 'plan'])
+            ->latest()
+            ->limit(8)
+            ->get();
+    }
+
+    /**
+     * @return array<string, int|string>
+     */
+    #[Computed]
+    public function clientSessionKpis(): array
+    {
+        return app(CustomerClientSessionService::class)->dashboardKpis($this->customer);
     }
 
     public function render()

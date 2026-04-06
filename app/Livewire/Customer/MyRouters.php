@@ -4,7 +4,10 @@ namespace App\Livewire\Customer;
 
 use App\Models\Router;
 use App\Models\User;
+use App\Services\HotspotBundleService;
 use App\Services\MikrotikApiService;
+use App\Services\RouterOnboardingService;
+use App\Support\RouterOnboarding;
 use Illuminate\Support\Facades\Auth;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
@@ -65,6 +68,16 @@ class MyRouters extends Component
 
     public function openScriptModal(string $routerId): void
     {
+        $this->openScriptModalInternal($routerId, false);
+    }
+
+    public function openScriptModalWithNewApiPassword(string $routerId): void
+    {
+        $this->openScriptModalInternal($routerId, true);
+    }
+
+    private function openScriptModalInternal(string $routerId, bool $rotateCredentials): void
+    {
         $this->selectedRouterId = $routerId;
         $this->scriptCopied = false;
 
@@ -74,7 +87,9 @@ class MyRouters extends Component
         }
 
         $this->generatedScript = app(MikrotikApiService::class)
-            ->generateFullSetupScript($router);
+            ->generateFullSetupScript($router, $rotateCredentials);
+
+        app(RouterOnboardingService::class)->recordScriptDownloaded($router->fresh());
 
         $this->showScriptModal = true;
     }
@@ -112,11 +127,55 @@ class MyRouters extends Component
         $this->generatedScript = '';
     }
 
+    public function closeDetailModal(): void
+    {
+        $this->showDetailModal = false;
+        $this->selectedRouterId = null;
+    }
+
     public function markScriptPasted(): void
     {
+        if ($this->selectedRouterId) {
+            $router = $this->customer->routers()->find($this->selectedRouterId);
+            if ($router) {
+                app(RouterOnboardingService::class)->markScriptAppliedPending($router);
+            }
+        }
+
         $this->showScriptModal = false;
         $this->generatedScript = '';
-        $this->dispatch('notify', message: __('Script applied! Router will connect shortly.'), type: 'success');
+        $this->dispatch('notify', message: __('Marked as pasted. Run a health check from your admin tools when the router finishes applying the script.'), type: 'success');
+    }
+
+    /**
+     * @return 'green'|'amber'|'red'|'zinc'
+     */
+    public function onboardingBadgeVariant(string $status): string
+    {
+        return match ($status) {
+            RouterOnboarding::READY => 'green',
+            RouterOnboarding::TUNNEL_OK, RouterOnboarding::API_OK, RouterOnboarding::PORTAL_OK => 'green',
+            RouterOnboarding::DEGRADED, RouterOnboarding::PORTAL_PENDING, RouterOnboarding::TUNNEL_PENDING, RouterOnboarding::API_PENDING => 'amber',
+            RouterOnboarding::ERROR, RouterOnboarding::CRED_MISMATCH, RouterOnboarding::OFFLINE, RouterOnboarding::BUNDLE_MISMATCH => 'red',
+            default => 'zinc',
+        };
+    }
+
+    public function regeneratePortalBundle(string $routerId): void
+    {
+        $router = $this->customer->routers()->find($routerId);
+
+        if (! $router) {
+            $this->dispatch('notify', message: __('Router not found.'), type: 'error');
+
+            return;
+        }
+
+        $router->ensureLocalPortalToken();
+        app(HotspotBundleService::class)->syncBundleMetadata($router->fresh(), $this->customer);
+        unset($this->routers);
+
+        $this->dispatch('notify', message: __('Hotspot bundle metadata refreshed. Regenerate the setup script to push files to MikroTik.'), type: 'success');
     }
 
     #[On('router-claimed')]

@@ -98,11 +98,36 @@ $navItem = fn(string $routeName, string $icon, string $label) => [
     'active' => request()->routeIs($routeName),
 ];
 
+$adminBillingNav = [
+    $navItem('admin.plans', 'credit-card', 'Billing Plans'),
+    $navItem('admin.vouchers', 'ticket', 'Vouchers'),
+    $navItem('admin.analytics', 'bar-chart-3', 'Analytics'),
+];
+if ($user?->can('reports.view')) {
+    $adminBillingNav[] = $navItem('admin.reports', 'file-bar-chart', 'Reports');
+}
+if ($user?->can('reports.export')) {
+    $adminBillingNav[] = $navItem('admin.support-exports', 'arrow-down-tray', 'Export center');
+}
+
+$resellerOpsNav = [
+    $navItem('admin.router-operations', 'router', 'Router operations'),
+    $navItem('admin.hotspot-payment-support', 'credit-card', 'Pay authorizations'),
+];
+if ($user?->can('reports.view')) {
+    $resellerOpsNav[] = $navItem('admin.reports', 'file-bar-chart', 'Reports');
+}
+if ($user?->can('reports.export')) {
+    $resellerOpsNav[] = $navItem('admin.support-exports', 'arrow-down-tray', 'Export center');
+}
+
 $groups = match (true) {
     $isAdmin || $role === 'super-admin' => [
         'Overview'  => [$navItem('dashboard', 'layout-dashboard', 'Dashboard')],
         'Network'   => [
             $navItem('admin.routers',    'server',        'Routers'),
+            $navItem('admin.router-operations', 'router',   'Router operations'),
+            $navItem('admin.hotspot-payment-support', 'credit-card', 'Pay authorizations'),
             $navItem('admin.monitoring', 'activity',      'Monitoring'),
             $navItem('admin.sessions',   'signal',        'Active Sessions'),
             $navItem('admin.hotspot',    'wifi',          'Hotspot System'),
@@ -112,11 +137,7 @@ $groups = match (true) {
             $navItem('admin.portal-customers', 'circle-user',    'Portal Accounts'),
             $navItem('admin.activity-log',     'clipboard-list', 'Activity Log'),
         ],
-        'Billing'   => [
-            $navItem('admin.plans',     'credit-card',  'Billing Plans'),
-            $navItem('admin.vouchers',  'ticket',       'Vouchers'),
-            $navItem('admin.analytics', 'bar-chart-3',  'Analytics'),
-        ],
+        'Billing'   => $adminBillingNav,
         'Tools'     => [
             $navItem('admin.tools',           'wrench',   'Network Tools'),
             $navItem('admin.radius',          'shield',   'RADIUS Tools'),
@@ -127,6 +148,7 @@ $groups = match (true) {
         'Overview'    => [$navItem('customer.dashboard', 'layout-dashboard', 'Dashboard')],
         'My Network'  => [
             $navItem('customer.routers',       'server',      'My Routers'),
+            $navItem('customer.client-sessions', 'users',     'Client sessions'),
             $navItem('customer.routers.claim', 'plus-circle', 'Claim a Router'),
         ],
         'Billing'     => [
@@ -139,8 +161,9 @@ $groups = match (true) {
             $navItem('customer.payment-settings', 'settings', 'Payment Settings'),
         ],
     ],
-    default => [  // reseller placeholder
+    default => [  // reseller
         'Overview' => [$navItem('dashboard', 'layout-dashboard', 'Dashboard')],
+        'Operations' => $resellerOpsNav,
     ],
 };
 
@@ -168,8 +191,7 @@ $storageKey = $isCustomer ? 'customerSidebar' : 'adminSidebar';
 <div id="hs-application-sidebar"
      x-bind:class="open ? 'lg:w-[260px]' : 'lg:w-[68px]'"
      class="hs-overlay [--auto-close:lg] hs-overlay-open:translate-x-0 -translate-x-full transition-all duration-300 transform w-[260px] fixed inset-y-0 start-0 z-[60] flex flex-col overflow-hidden {{ $theme['bg'] }} border-e {{ $theme['border'] }}
-            lg:translate-x-0 lg:end-auto lg:bottom-0
-            [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-black/10 [&::-webkit-scrollbar-thumb]:bg-white/20"
+            lg:translate-x-0 lg:end-auto lg:bottom-0"
      role="dialog" aria-label="{{ $theme['role_label'] }} Sidebar">
 
     {{-- ── Logo ── --}}
@@ -199,7 +221,7 @@ $storageKey = $isCustomer ? 'customerSidebar' : 'adminSidebar';
     </div>
 
     {{-- ── Nav ── --}}
-    <nav class="flex-1 py-4 overflow-y-auto overflow-x-hidden transition-all duration-300"
+    <nav class="sidebar-scroll flex-1 min-h-0 overscroll-y-contain py-4 overflow-y-auto overflow-x-hidden transition-all duration-300 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
          x-bind:class="open ? 'px-3' : 'px-2'">
 
         @foreach($groups as $groupName => $items)

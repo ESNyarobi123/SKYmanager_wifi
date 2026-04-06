@@ -1,10 +1,7 @@
 <?php
 
-use App\Models\BillingPlan;
-use App\Models\Payment;
-use App\Models\Router;
-use App\Models\Subscription;
-use App\Models\WifiUser;
+use App\Services\BusinessKpiService;
+use Illuminate\Support\Facades\Auth;
 use Livewire\Attributes\Computed;
 use Livewire\Component;
 
@@ -13,30 +10,45 @@ new class extends Component
     #[Computed]
     public function stats(): array
     {
-        return [
-            'active_sessions' => Subscription::where('status', 'active')
-                ->where('expires_at', '>', now())
-                ->count(),
-            'online_routers' => Router::where('is_online', true)->count(),
-            'total_routers' => Router::count(),
-            'revenue_today' => Payment::where('status', 'success')
-                ->whereDate('created_at', today())
-                ->sum('amount'),
-            'revenue_month' => Payment::where('status', 'success')
-                ->whereMonth('created_at', now()->month)
-                ->sum('amount'),
-            'active_plans' => BillingPlan::where('is_active', true)->count(),
-            'total_users' => WifiUser::count(),
-        ];
+        $user = Auth::user();
+        if (! $user) {
+            return [
+                'active_sessions' => 0,
+                'online_routers' => 0,
+                'total_routers' => 0,
+                'revenue_today' => 0,
+                'revenue_month' => 0,
+                'active_plans' => 0,
+                'total_users' => 0,
+            ];
+        }
+
+        return app(BusinessKpiService::class)->platformOrResellerDashboardStats($user);
     }
 
     #[Computed]
     public function recentPayments(): \Illuminate\Database\Eloquent\Collection
     {
-        return Payment::with(['subscription.wifiUser', 'subscription.plan'])
-            ->latest()
-            ->limit(8)
-            ->get();
+        $user = Auth::user();
+        if (! $user) {
+            return collect();
+        }
+
+        return app(BusinessKpiService::class)->recentSubscriptionPayments($user, 8);
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    #[Computed]
+    public function operationsIncidentSummary(): array
+    {
+        $user = Auth::user();
+        if (! $user || (! $user->can('router-operations.view') && ! $user->can('hotspot-payments.support'))) {
+            return [];
+        }
+
+        return app(BusinessKpiService::class)->operationsIncidentSummaryFor($user);
     }
 };
 ?>
@@ -103,6 +115,63 @@ new class extends Component
         </div>
 
     </div>
+
+    @if(count($this->operationsIncidentSummary) > 0)
+        <div class="rounded-xl border border-amber-200/80 bg-amber-50/50 dark:bg-amber-950/20 dark:border-amber-900/40 p-5">
+            <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
+                    <h2 class="text-sm font-semibold text-gray-800 dark:text-neutral-200">{{ __('Operations & payments') }}</h2>
+                    <p class="text-xs text-gray-500 dark:text-neutral-500">{{ __('Counts from the same summary used on router operations — hotspot and router incidents.') }}</p>
+                </div>
+                @can('router-operations.view')
+                    <a href="{{ route('admin.router-operations') }}" wire:navigate class="text-xs font-medium text-amber-800 dark:text-amber-300 hover:underline">{{ __('Router operations') }} →</a>
+                @endcan
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                @can('router-operations.view')
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Long claim (72h+)') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['routers_long_claimed'] }}</p>
+                    </div>
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Tunnel stuck 24h+') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['routers_tunnel_stuck'] }}</p>
+                    </div>
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Credential flags') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['routers_cred_flags'] }}</p>
+                    </div>
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Routers offline') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['routers_offline_status'] }}</p>
+                    </div>
+                @endcan
+                @can('hotspot-payments.support')
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Hotspot stuck authorizing') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['hotspot_stuck_authorizing'] }}</p>
+                    </div>
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Hotspot retry exhausted') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['hotspot_retry_exhausted'] }}</p>
+                    </div>
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Paid, not on router') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['hotspot_provider_confirmed_not_authorized'] }}</p>
+                    </div>
+                    <div class="rounded-lg bg-white/80 dark:bg-neutral-900/40 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-neutral-500">{{ __('Authorize failures 24h') }}</p>
+                        <p class="text-xl font-bold text-gray-900 dark:text-neutral-100">{{ $this->operationsIncidentSummary['hotspot_authorize_failures_24h'] }}</p>
+                    </div>
+                @endcan
+            </div>
+            @can('hotspot-payments.support')
+                <p class="mt-3 text-xs">
+                    <a href="{{ route('admin.hotspot-payment-support') }}" wire:navigate class="font-medium text-amber-800 dark:text-amber-300 hover:underline">{{ __('Hotspot payment authorizations') }} →</a>
+                </p>
+            @endcan
+        </div>
+    @endif
 
     {{-- Quick Nav + Recent Payments --}}
     <div class="grid gap-6 lg:grid-cols-3">

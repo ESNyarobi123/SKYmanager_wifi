@@ -38,6 +38,8 @@ return [
     'clickpesa' => [
         'client_id' => env('CLICKPESA_CLIENT_ID'),
         'api_key' => env('CLICKPESA_API_KEY'),
+        'webhook_secret' => env('CLICKPESA_WEBHOOK_SECRET'),
+        'webhook_signature_header' => env('CLICKPESA_WEBHOOK_SIGNATURE_HEADER', 'X-ClickPesa-Signature'),
     ],
 
     'ztp' => [

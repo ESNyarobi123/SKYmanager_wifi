@@ -109,6 +109,61 @@
 
     </div>
 
+    @php $cs = $this->clientSessionKpis; @endphp
+    <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 mb-6">
+        <a href="{{ route('customer.client-sessions') }}" wire:navigate class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700 hover:border-sky-300 dark:hover:border-sky-700 transition-colors">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Active access windows') }}</p>
+            <p class="text-2xl font-bold text-gray-800 dark:text-neutral-200">{{ $cs['active_access_count'] }}</p>
+            <p class="mt-1 text-[10px] text-gray-400 dark:text-neutral-500">{{ __('Subscriptions + authorized hotspot') }}</p>
+        </a>
+        <a href="{{ route('customer.client-sessions') }}?tab=active&amp;access=pending" wire:navigate class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700 hover:border-amber-300 dark:hover:border-amber-700 transition-colors">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Pending authorization') }}</p>
+            <p class="text-2xl font-bold text-amber-700 dark:text-amber-400">{{ $cs['pending_access_count'] }}</p>
+            <p class="mt-1 text-[10px] text-gray-400 dark:text-neutral-500">{{ __('Hotspot payment in progress') }}</p>
+        </a>
+        <a href="{{ route('customer.client-sessions') }}" wire:navigate class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700 hover:border-orange-300 dark:hover:border-orange-700 transition-colors">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Expiring ≤ 24h') }}</p>
+            <p class="text-2xl font-bold text-orange-600 dark:text-orange-400">{{ $cs['expiring_24h_count'] }}</p>
+            <p class="mt-1 text-[10px] text-gray-400 dark:text-neutral-500">{{ __('Valid windows ending soon') }}</p>
+        </a>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Top router (active)') }}</p>
+            <p class="text-sm font-semibold text-gray-800 dark:text-neutral-200 line-clamp-2">{{ $cs['top_active_router_label'] }}</p>
+            <p class="mt-1 text-[10px] text-gray-400 dark:text-neutral-500">{{ __('Recorded subscription usage') }}: {{ number_format($cs['subscription_recorded_usage_mb']) }} MB</p>
+        </div>
+    </div>
+
+    @php $ops = $this->operationsSummary; @endphp
+    @if(!empty($ops['trust_messages']))
+        <div class="rounded-xl border border-sky-200/80 bg-sky-50/60 dark:bg-sky-950/20 dark:border-sky-900/40 p-4 mb-6">
+            <h2 class="text-sm font-semibold text-sky-900 dark:text-sky-200 mb-2">{{ __('Business status') }}</h2>
+            <ul class="list-disc pl-5 space-y-1 text-xs text-sky-900/90 dark:text-sky-300/90">
+                @foreach($ops['trust_messages'] as $msg)
+                    <li>{{ $msg }}</li>
+                @endforeach
+            </ul>
+        </div>
+    @endif
+
+    <div class="grid grid-cols-2 gap-3 lg:grid-cols-4 mb-6">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Routers ready') }}</p>
+            <p class="text-2xl font-bold text-gray-800 dark:text-neutral-200">{{ $ops['routers_ready'] }}</p>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Degraded / offline (onb.)') }}</p>
+            <p class="text-2xl font-bold text-gray-800 dark:text-neutral-200">{{ $ops['routers_degraded'] + $ops['routers_offline_onboarding'] }}</p>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Hotspot auth week') }}</p>
+            <p class="text-2xl font-bold text-gray-800 dark:text-neutral-200">{{ $ops['hotspot_auth_success_rate_week_pct'] }}%</p>
+        </div>
+        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:bg-neutral-800 dark:border-neutral-700">
+            <p class="text-[10px] uppercase text-gray-500 dark:text-neutral-400">{{ __('Vouchers unused') }}</p>
+            <p class="text-2xl font-bold text-gray-800 dark:text-neutral-200">{{ $ops['vouchers_unused'] }}</p>
+        </div>
+    </div>
+
     {{-- ══ ROUTERS + SUBSCRIPTIONS GRID ══ --}}
     <div class="grid grid-cols-1 gap-5 lg:grid-cols-2 mb-6">
 
@@ -196,6 +251,45 @@
             @endforelse
         </div>
 
+    </div>
+
+    {{-- ══ RECENT HOTSPOT PAYMENTS ══ --}}
+    <div class="flex flex-col bg-white border border-gray-200 shadow-sm rounded-xl dark:bg-neutral-800 dark:border-neutral-700 mb-6">
+        <div class="px-5 py-4 border-b border-gray-100 dark:border-neutral-700 flex items-center justify-between">
+            <h2 class="flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-neutral-200">
+                <x-lucide name="smartphone" class="size-4 text-sky-500"/>
+                {{ __('Recent hotspot payments') }}
+            </h2>
+            <flux:button :href="route('customer.payment-settings')" variant="ghost" size="sm" wire:navigate>{{ __('Payment settings') }}</flux:button>
+        </div>
+        @if($this->recentHotspotPayments->isNotEmpty())
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-neutral-700">
+                    <thead class="bg-gray-50 dark:bg-neutral-700/30">
+                        <tr>
+                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 uppercase">{{ __('Reference') }}</th>
+                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 uppercase">{{ __('Router') }}</th>
+                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 uppercase">{{ __('Status') }}</th>
+                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 uppercase">{{ __('Amount') }}</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200 dark:divide-neutral-700">
+                        @foreach($this->recentHotspotPayments as $hp)
+                            <tr>
+                                <td class="px-5 py-3 text-xs font-mono">{{ \Illuminate\Support\Str::limit($hp->reference, 18) }}</td>
+                                <td class="px-5 py-3 text-sm">{{ $hp->router?->name ?? '—' }}</td>
+                                <td class="px-5 py-3">
+                                    <flux:badge size="sm" color="{{ $hp->status === 'authorized' ? 'green' : ($hp->status === 'failed' ? 'red' : 'zinc') }}">{{ $hp->status }}</flux:badge>
+                                </td>
+                                <td class="px-5 py-3 text-sm font-semibold">TZS {{ number_format($hp->amount) }}</td>
+                            </tr>
+                        @endforeach
+                    </tbody>
+                </table>
+            </div>
+        @else
+            <p class="text-sm text-gray-500 py-10 text-center px-5">{{ __('No hotspot payments in this account yet.') }}</p>
+        @endif
     </div>
 
     {{-- ══ RECENT PAYMENTS — Preline table ══ --}}

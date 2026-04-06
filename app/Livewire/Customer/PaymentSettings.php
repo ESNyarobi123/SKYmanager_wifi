@@ -5,7 +5,7 @@ namespace App\Livewire\Customer;
 use App\Models\ActivityLog;
 use App\Models\CustomerPaymentGateway;
 use App\Models\User;
-use Illuminate\Support\Facades\Http;
+use App\Services\PaymentGatewayService;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Validate;
 use Livewire\Component;
@@ -113,13 +113,12 @@ class PaymentSettings extends Component
         $this->testMessage = '';
 
         try {
-            $response = Http::timeout(10)
-                ->post('https://api.clickpesa.com/third-parties/non-trade/users/generate-token', [
-                    'clientId' => $gateway->consumer_key,
-                    'apiKey' => $gateway->consumer_secret,
-                ]);
+            $probe = PaymentGatewayService::probeCredentials(
+                (string) $gateway->consumer_key,
+                (string) $gateway->consumer_secret
+            );
 
-            if ($response->successful() && $response->json('token')) {
+            if ($probe['ok']) {
                 $gateway->update(['verified_at' => now()]);
                 unset($this->gateway);
 
@@ -132,9 +131,8 @@ class PaymentSettings extends Component
                 $this->testPassed = true;
                 $this->testMessage = __('Connection successful! Your ClickPesa account is connected.');
             } else {
-                $body = $response->json();
                 $this->testPassed = false;
-                $this->testMessage = $body['message'] ?? $body['error'] ?? __('Connection failed. Check your credentials and try again.');
+                $this->testMessage = $probe['message'] ?? __('Connection failed. Check your credentials and try again.');
             }
         } catch (\Exception $e) {
             $this->testPassed = false;

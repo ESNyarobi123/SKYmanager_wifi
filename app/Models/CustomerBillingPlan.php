@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Database\Factories\CustomerBillingPlanFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -9,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class CustomerBillingPlan extends Model
 {
+    /** @use HasFactory<CustomerBillingPlanFactory> */
     use HasFactory, HasUlids;
 
     protected $fillable = [
@@ -63,7 +65,10 @@ class CustomerBillingPlan extends Model
     }
 
     /**
-     * Speed label (e.g. "5 Mbps / 10 Mbps" or "Unlimited").
+     * Speed label for UI (e.g. "↑5M / ↓10M", "↑512k / ↓2M", or "Unlimited").
+     *
+     * Values are stored in kbps (MikroTik). Values below 1 Mbps are shown in kbps-style "k"
+     * so small numbers are never mis-shown as "0M" when operators confused units.
      */
     public function speedLabel(): string
     {
@@ -71,10 +76,35 @@ class CustomerBillingPlan extends Model
             return 'Unlimited';
         }
 
-        $up = $this->upload_speed_kbps ? round($this->upload_speed_kbps / 1024, 1).'M' : '∞';
-        $down = $this->download_speed_kbps ? round($this->download_speed_kbps / 1024, 1).'M' : '∞';
+        $up = self::formatKbpsForLabel($this->upload_speed_kbps);
+        $down = self::formatKbpsForLabel($this->download_speed_kbps);
 
         return "↑{$up} / ↓{$down}";
+    }
+
+    /**
+     * @param  int|null  $kbps  Stored kbps; null/0 means unlimited for that direction.
+     */
+    public static function formatKbpsForLabel(?int $kbps): string
+    {
+        if (! $kbps) {
+            return '∞';
+        }
+
+        if ($kbps < 1024) {
+            return "{$kbps}k";
+        }
+
+        $mbps = $kbps / 1024;
+        $roundedOne = round($mbps, 1);
+
+        if ($roundedOne > 0) {
+            $out = $roundedOne == (int) $roundedOne ? (string) (int) $roundedOne : (string) $roundedOne;
+
+            return $out.'M';
+        }
+
+        return "{$kbps}k";
     }
 
     /**

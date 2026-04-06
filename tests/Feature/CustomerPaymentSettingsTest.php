@@ -2,7 +2,9 @@
 
 use App\Livewire\Customer\PaymentSettings;
 use App\Models\Customer;
+use App\Models\CustomerBillingPlan;
 use App\Models\CustomerPaymentGateway;
+use App\Models\HotspotPayment;
 use App\Models\Router;
 use App\Models\User;
 use App\Services\PaymentGatewayService;
@@ -182,6 +184,36 @@ test('forRouter falls back to system for unclaimed router', function () {
     expect($service->isUsingCustomerCredentials())->toBeFalse();
 });
 
+test('forHotspotPayment uses customer_payment_gateway_id so verify uses same ClickPesa app as initiate', function () {
+    $customer = Customer::factory()->create();
+    $gateway = CustomerPaymentGateway::create([
+        'customer_id' => $customer->id,
+        'gateway' => 'clickpesa',
+        'consumer_key' => 'hotspot_key_xyz',
+        'consumer_secret' => 'hotspot_sec_xyz',
+        'is_active' => true,
+    ]);
+    $router = Router::factory()->create(['user_id' => $customer->id]);
+    $plan = CustomerBillingPlan::factory()->create(['customer_id' => $customer->id]);
+
+    $payment = HotspotPayment::create([
+        'router_id' => $router->id,
+        'plan_id' => $plan->id,
+        'customer_payment_gateway_id' => $gateway->id,
+        'client_mac' => 'AA:BB:CC:DD:EE:FF',
+        'client_ip' => '192.168.1.1',
+        'phone' => '255712345678',
+        'amount' => 500,
+        'reference' => 'HP-ABCDEFGHIJKL',
+        'status' => 'pending',
+    ]);
+
+    $service = PaymentGatewayService::forHotspotPayment($payment);
+
+    expect($service->isUsingCustomerCredentials())->toBeTrue()
+        ->and($service->activeGatewayId())->toBe($gateway->id);
+});
+
 // ── Livewire save credentials ──────────────────────────────────────────────────
 
 test('customer can save ClickPesa credentials via Livewire', function () {
@@ -219,7 +251,8 @@ test('save validates consumer key is required', function () {
 
 test('testConnection sets testPassed true on valid credentials', function () {
     Http::fake([
-        'api.clickpesa.com/third-parties/non-trade/users/generate-token' => Http::response([
+        'api.clickpesa.com/third-parties/generate-token' => Http::response([
+            'success' => true,
             'token' => 'Bearer eyJfaketoken',
         ], 200),
     ]);
@@ -243,7 +276,7 @@ test('testConnection sets testPassed true on valid credentials', function () {
 
 test('testConnection sets testPassed false on API error', function () {
     Http::fake([
-        'api.clickpesa.com/third-parties/non-trade/users/generate-token' => Http::response([
+        'api.clickpesa.com/third-parties/generate-token' => Http::response([
             'message' => 'Invalid credentials',
         ], 401),
     ]);

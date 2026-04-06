@@ -26,6 +26,8 @@ class RolesAndPermissionsSeeder extends Seeder
             // Routers
             'routers.view', 'routers.create', 'routers.edit', 'routers.delete',
             'routers.claim',
+            'router-operations.view', 'router-operations.repair',
+            'hotspot-payments.support',
 
             // Subscriptions & payments
             'subscriptions.view', 'subscriptions.manage',
@@ -36,6 +38,9 @@ class RolesAndPermissionsSeeder extends Seeder
 
             // Plans
             'plans.view', 'plans.create', 'plans.edit', 'plans.delete',
+
+            // Reporting & exports (admin / reseller)
+            'reports.view', 'reports.export',
 
             // Settings
             'settings.view', 'settings.edit',
@@ -69,10 +74,13 @@ class RolesAndPermissionsSeeder extends Seeder
             'customers.delete', 'customers.suspend', 'customers.notify',
             'customers.payment-gateways.disable',
             'routers.view', 'routers.create', 'routers.edit', 'routers.delete',
+            'router-operations.view', 'router-operations.repair',
+            'hotspot-payments.support',
             'subscriptions.view', 'subscriptions.manage',
             'invoices.view', 'invoices.download',
             'hotspot.view', 'hotspot.manage',
             'plans.view', 'plans.create', 'plans.edit', 'plans.delete',
+            'reports.view', 'reports.export',
             'settings.view', 'settings.edit',
             'activity-log.view',
         ];
@@ -80,10 +88,13 @@ class RolesAndPermissionsSeeder extends Seeder
         $resellerPermissions = [
             'customers.view', 'customers.create', 'customers.edit', 'customers.suspend',
             'routers.view', 'routers.create', 'routers.edit',
+            'router-operations.view', 'router-operations.repair',
+            'hotspot-payments.support',
             'subscriptions.view', 'subscriptions.manage',
             'invoices.view', 'invoices.download',
             'hotspot.view', 'hotspot.manage',
             'plans.view',
+            'reports.view', 'reports.export',
             'activity-log.view',
         ];
 

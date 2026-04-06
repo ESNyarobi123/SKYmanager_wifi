@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Customer;
 
+use App\Http\Controllers\Controller;
 use App\Http\Resources\SubscriptionResource;
 use App\Models\Subscription;
 use Illuminate\Http\Request;

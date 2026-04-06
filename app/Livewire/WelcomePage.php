@@ -13,6 +13,9 @@ class WelcomePage extends Component
 {
     public string $companyName = 'SKYmanager';
 
+    /** @var bool Mobile navigation drawer for the public header. */
+    public bool $mobileOpen = false;
+
     public function mount(): void
     {
         if (auth()->check()) {

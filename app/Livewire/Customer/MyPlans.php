@@ -36,11 +36,11 @@ class MyPlans extends Component
     #[Validate('nullable|integer|min:1|max:1048576')]
     public string $dataQuotaMb = '';
 
-    #[Validate('nullable|integer|min:1|max:1048576')]
-    public string $uploadSpeedKbps = '';
+    /** Upload cap in Mbps (empty = unlimited). Converted to kbps on save. */
+    public string $uploadSpeedMbps = '';
 
-    #[Validate('nullable|integer|min:1|max:1048576')]
-    public string $downloadSpeedKbps = '';
+    /** Download cap in Mbps (empty = unlimited). Converted to kbps on save. */
+    public string $downloadSpeedMbps = '';
 
     #[Validate('nullable|string|max:500')]
     public string $description = '';
@@ -56,6 +56,9 @@ class MyPlans extends Component
 
     // ── Download / Preview modal state ───────────────────────────────────────
     public bool $showDownloadModal = false;
+
+    /** Pick router then open hotspot bundle page (full portal structure). */
+    public bool $showBundleRouterModal = false;
 
     public bool $showPreviewModal = false;
 
@@ -117,8 +120,8 @@ class MyPlans extends Component
         $this->description = $plan->description ?? '';
         $this->isActive = $plan->is_active;
         $this->dataQuotaMb = $plan->data_quota_mb ? (string) $plan->data_quota_mb : '';
-        $this->uploadSpeedKbps = $plan->upload_speed_kbps ? (string) $plan->upload_speed_kbps : '';
-        $this->downloadSpeedKbps = $plan->download_speed_kbps ? (string) $plan->download_speed_kbps : '';
+        $this->uploadSpeedMbps = $this->kbpsToMbpsInput($plan->upload_speed_kbps);
+        $this->downloadSpeedMbps = $this->kbpsToMbpsInput($plan->download_speed_kbps);
 
         // Determine unit from stored minutes
         $minutes = $plan->duration_minutes;
@@ -143,8 +146,8 @@ class MyPlans extends Component
             'price' => 'required|numeric|min:0|max:999999',
             'durationMinutes' => 'required|integer|min:1',
             'dataQuotaMb' => 'nullable|integer|min:1|max:1048576',
-            'uploadSpeedKbps' => 'nullable|integer|min:1|max:1048576',
-            'downloadSpeedKbps' => 'nullable|integer|min:1|max:1048576',
+            'uploadSpeedMbps' => 'nullable|numeric|min:0.001|max:10240',
+            'downloadSpeedMbps' => 'nullable|numeric|min:0.001|max:10240',
             'description' => 'nullable|string|max:500',
             'isActive' => 'boolean',
         ]);
@@ -156,8 +159,8 @@ class MyPlans extends Component
             'price' => $this->price,
             'duration_minutes' => $storedMinutes,
             'data_quota_mb' => $this->dataQuotaMb ?: null,
-            'upload_speed_kbps' => $this->uploadSpeedKbps ?: null,
-            'download_speed_kbps' => $this->downloadSpeedKbps ?: null,
+            'upload_speed_kbps' => $this->mbpsInputToKbps($this->uploadSpeedMbps),
+            'download_speed_kbps' => $this->mbpsInputToKbps($this->downloadSpeedMbps),
             'description' => $this->description ?: null,
             'is_active' => $this->isActive,
         ];
@@ -220,8 +223,44 @@ class MyPlans extends Component
     }
 
     /**
-     * Open the "Generate Standalone Login.html" download modal.
-     * If the customer has exactly one router, redirect directly to the download.
+     * Recommended path: hotspot bundle page (all portal files + same files the setup script fetches).
+     */
+    public function openHotspotBundleFlow(): void
+    {
+        $routers = $this->customerRouters;
+
+        if ($routers->isEmpty()) {
+            $this->dispatch('notify', message: __('You have no routers yet. Claim a router first.'), type: 'warning');
+
+            return;
+        }
+
+        if ($routers->count() === 1) {
+            $this->redirect(route('customer.plans.hotspot-bundle', ['routerId' => $routers->first()->id]));
+
+            return;
+        }
+
+        $this->showBundleRouterModal = true;
+    }
+
+    public function goToHotspotBundleForRouter(string $routerId): void
+    {
+        $router = $this->customerRouters->firstWhere('id', $routerId);
+
+        if (! $router) {
+            $this->dispatch('notify', message: __('Router not found.'), type: 'error');
+
+            return;
+        }
+
+        $this->showBundleRouterModal = false;
+        $this->redirect(route('customer.plans.hotspot-bundle', ['routerId' => $routerId]));
+    }
+
+    /**
+     * Legacy: one self-contained HTML file (popup/captive portal may be fragile vs full bundle).
+     * If the customer has exactly one router, redirect directly to the signed download.
      * If they have multiple, show the router-selection modal.
      */
     public function openDownloadModal(): void
@@ -316,6 +355,34 @@ class MyPlans extends Component
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    protected function kbpsToMbpsInput(?int $kbps): string
+    {
+        if (! $kbps) {
+            return '';
+        }
+
+        $mbps = $kbps / 1024;
+        $formatted = number_format($mbps, 4, '.', '');
+        $formatted = rtrim(rtrim($formatted, '0'), '.');
+
+        return $formatted === '' ? '0' : $formatted;
+    }
+
+    protected function mbpsInputToKbps(string $value): ?int
+    {
+        $trimmed = trim(str_replace(',', '.', $value));
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $mbps = (float) $trimmed;
+        if ($mbps <= 0) {
+            return null;
+        }
+
+        return max(1, (int) round($mbps * 1024));
+    }
+
     protected function resolveMinutes(): int
     {
         $value = (int) $this->durationMinutes;
@@ -334,8 +401,8 @@ class MyPlans extends Component
         $this->durationMinutes = '';
         $this->durationUnit = 'minutes';
         $this->dataQuotaMb = '';
-        $this->uploadSpeedKbps = '';
-        $this->downloadSpeedKbps = '';
+        $this->uploadSpeedMbps = '';
+        $this->downloadSpeedMbps = '';
         $this->description = '';
         $this->isActive = true;
         $this->resetValidation();

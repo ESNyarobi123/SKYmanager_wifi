@@ -15,10 +15,13 @@
             <flux:button size="sm" variant="ghost" icon="eye" wire:click="openPreviewModal" wire:loading.attr="disabled">
                 {{ __('Preview') }}
             </flux:button>
-            <flux:button size="sm" variant="ghost" icon="arrow-down-tray" wire:click="openDownloadModal">
-                {{ __('Generate Login.html') }}
+            <flux:button size="sm" variant="primary" icon="folder-open" wire:click="openHotspotBundleFlow">
+                {{ __('Hotspot bundle') }}
             </flux:button>
-            <flux:button size="sm" variant="primary" icon="plus" wire:click="openCreateModal">
+            <flux:button size="sm" variant="ghost" icon="arrow-down-tray" wire:click="openDownloadModal">
+                {{ __('Legacy: one HTML file') }}
+            </flux:button>
+            <flux:button size="sm" variant="ghost" icon="plus" wire:click="openCreateModal">
                 {{ __('Add Plan') }}
             </flux:button>
         </div>
@@ -34,11 +37,18 @@
                 </div>
                 <div class="min-w-0">
                     <p class="text-base font-bold text-white leading-tight">{{ __('Ready to deploy your hotspot?') }}</p>
-                    <p class="text-xs text-indigo-200 mt-0.5 leading-relaxed">{{ __('Your plans and branding are embedded — upload directly to MikroTik.') }}</p>
-                    <p class="text-xs text-indigo-300 mt-1">{{ __('Links expire in 15 minutes for security.') }}</p>
+                    <p class="text-xs text-indigo-200 mt-0.5 leading-relaxed">{{ __('Use the full hotspot bundle — same files your MikroTik setup script downloads (popup-safe).') }}</p>
+                    <p class="text-xs text-indigo-300 mt-1">{{ __('Signed download links expire in 15 minutes for security.') }}</p>
                 </div>
             </div>
             <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                <div class="flex flex-col items-center gap-0.5">
+                    <flux:button size="sm" icon="folder-open" wire:click="openHotspotBundleFlow"
+                        class="w-full sm:w-auto bg-white text-indigo-700 hover:bg-indigo-50 border-0 font-bold shadow">
+                        {{ __('Hotspot bundle') }}
+                    </flux:button>
+                    <span class="text-xs text-indigo-300">{{ __('Full folder structure') }}</span>
+                </div>
                 <div class="flex flex-col items-center gap-0.5">
                     <flux:button size="sm" icon="eye" wire:click="openPreviewModal" wire:loading.attr="disabled"
                         class="w-full sm:w-auto bg-white/15 hover:bg-white/25 border border-white/30 text-white font-semibold">
@@ -47,11 +57,11 @@
                     <span class="text-xs text-indigo-300">{{ __('Opens in new tab') }}</span>
                 </div>
                 <div class="flex flex-col items-center gap-0.5">
-                    <flux:button size="sm" icon="arrow-down-tray" wire:click="openDownloadModal"
-                        class="w-full sm:w-auto bg-white text-indigo-700 hover:bg-indigo-50 border-0 font-bold shadow">
-                        {{ __('Generate Login.html') }}
+                    <flux:button size="sm" variant="ghost" icon="arrow-down-tray" wire:click="openDownloadModal"
+                        class="w-full sm:w-auto border border-white/40 text-white hover:bg-white/10 font-medium">
+                        {{ __('Legacy one file') }}
                     </flux:button>
-                    <span class="text-xs text-indigo-300">{{ __('Download file') }}</span>
+                    <span class="text-xs text-indigo-300/80">{{ __('Not recommended') }}</span>
                 </div>
             </div>
         </div>
@@ -204,19 +214,19 @@
                 <flux:error name="durationMinutes"/>
             </div>
 
-            {{-- Speeds (side by side) --}}
+            {{-- Speeds (Mbps — stored as kbps for MikroTik) --}}
             <div class="grid grid-cols-2 gap-3">
                 <flux:field>
-                    <flux:label>{{ __('Upload Speed (kbps)') }}</flux:label>
-                    <flux:input wire:model="uploadSpeedKbps" type="number" min="1" placeholder="{{ __('Unlimited') }}"/>
-                    <flux:description>{{ __('Leave blank for unlimited') }}</flux:description>
-                    <flux:error name="uploadSpeedKbps"/>
+                    <flux:label>{{ __('Upload (Mbps)') }}</flux:label>
+                    <flux:input wire:model="uploadSpeedMbps" type="number" step="0.1" min="0.001" placeholder="{{ __('Unlimited') }}"/>
+                    <flux:description>{{ __('Megabits per second. Leave blank for unlimited.') }}</flux:description>
+                    <flux:error name="uploadSpeedMbps"/>
                 </flux:field>
                 <flux:field>
-                    <flux:label>{{ __('Download Speed (kbps)') }}</flux:label>
-                    <flux:input wire:model="downloadSpeedKbps" type="number" min="1" placeholder="{{ __('Unlimited') }}"/>
-                    <flux:description>{{ __('Leave blank for unlimited') }}</flux:description>
-                    <flux:error name="downloadSpeedKbps"/>
+                    <flux:label>{{ __('Download (Mbps)') }}</flux:label>
+                    <flux:input wire:model="downloadSpeedMbps" type="number" step="0.1" min="0.001" placeholder="{{ __('Unlimited') }}"/>
+                    <flux:description>{{ __('Megabits per second. Leave blank for unlimited.') }}</flux:description>
+                    <flux:error name="downloadSpeedMbps"/>
                 </flux:field>
             </div>
 
@@ -300,11 +310,51 @@
         </div>
     </flux:modal>
 
-    {{-- ══ GENERATE STANDALONE LOGIN.HTML MODAL ══ --}}
+    {{-- ══ HOTSPOT BUNDLE (recommended) — pick router ══ --}}
+    <flux:modal wire:model="showBundleRouterModal" class="w-full max-w-lg">
+        <div class="mb-4">
+            <flux:heading>{{ __('Hotspot bundle') }}</flux:heading>
+            <flux:subheading>{{ __('Open the full portal package for a router — every file the captive portal needs, matching what the MikroTik setup script installs.') }}</flux:subheading>
+        </div>
+
+        <div class="space-y-2">
+            @foreach($this->customerRouters as $router)
+            <div class="flex items-center justify-between rounded-xl border border-gray-200 dark:border-neutral-700 px-4 py-3 hover:border-sky-300 dark:hover:border-sky-700 hover:bg-sky-50/50 dark:hover:bg-sky-900/10 transition-colors">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-neutral-800">
+                        <x-lucide name="folder-open" class="size-4 text-gray-500 dark:text-neutral-400"/>
+                    </div>
+                    <div class="min-w-0">
+                        <p class="text-sm font-semibold text-gray-800 dark:text-neutral-200 truncate">{{ $router->hotspot_ssid ?: $router->name }}</p>
+                        @if($router->hotspot_ssid && $router->name !== $router->hotspot_ssid)
+                        <p class="text-xs text-gray-400 dark:text-neutral-500 truncate">{{ $router->name }}</p>
+                        @endif
+                    </div>
+                </div>
+                <flux:button size="sm" variant="primary" wire:click="goToHotspotBundleForRouter('{{ $router->id }}')"
+                    icon="arrow-right" wire:loading.attr="disabled">
+                    {{ __('Open') }}
+                </flux:button>
+            </div>
+            @endforeach
+        </div>
+
+        <div class="mt-4 rounded-lg bg-sky-50 dark:bg-sky-900/10 border border-sky-200 dark:border-sky-800 px-4 py-3">
+            <p class="text-xs text-sky-800 dark:text-sky-200">
+                {{ __('For automatic install, copy the setup script from My Routers — it downloads this same bundle into the correct hotspot folder on the router.') }}
+            </p>
+        </div>
+
+        <div class="flex justify-end mt-4">
+            <flux:button wire:click="$set('showBundleRouterModal', false)" variant="ghost">{{ __('Close') }}</flux:button>
+        </div>
+    </flux:modal>
+
+    {{-- ══ LEGACY: single self-contained HTML (optional) ══ --}}
     <flux:modal wire:model="showDownloadModal" class="w-full max-w-lg">
         <div class="mb-4">
-            <flux:heading>{{ __('Generate Standalone Login.html') }}</flux:heading>
-            <flux:subheading>{{ __('Select which router to generate the file for. Your plans and API settings will be embedded.') }}</flux:subheading>
+            <flux:heading>{{ __('Legacy: single HTML file') }}</flux:heading>
+            <flux:subheading>{{ __('One old-style file with everything inlined. Prefer the hotspot bundle + setup script for reliable pop-ups and updates.') }}</flux:subheading>
         </div>
 
         <div class="space-y-2">
@@ -330,8 +380,8 @@
         </div>
 
         <div class="mt-5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 px-4 py-3">
-            <p class="text-xs font-medium text-amber-700 dark:text-amber-400">
-                {{ __('After downloading: rename to login.html and upload it to your MikroTik via the Files section, or run the MikroTik Setup Script which uploads it automatically.') }}
+            <p class="text-xs font-medium text-amber-800 dark:text-amber-200">
+                {{ __('The file is named so you know it is the legacy build. If you upload it by hand, rename it to login.html inside the hotspot directory only — the recommended path is the bundle + script from My Routers.') }}
             </p>
         </div>
 

@@ -43,12 +43,19 @@
                 <x-lucide name="file-text" class="size-4 text-sky-500"/>
                 {{ __('Invoice History') }}
             </h2>
-            <flux:select wire:model.live="statusFilter" size="sm" class="w-full sm:w-40">
+            <div class="flex flex-wrap items-center gap-2">
+                <a href="{{ route('customer.invoices.export', ['from' => now()->subYear()->toDateString(), 'to' => now()->toDateString()]) }}"
+                    class="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-neutral-300 hover:border-sky-400">
+                    <x-lucide name="arrow-down-tray" class="size-3.5"/>
+                    {{ __('CSV (12 mo)') }}
+                </a>
+                <flux:select wire:model.live="statusFilter" size="sm" class="w-full sm:w-40">
                 <flux:select.option value="all">{{ __('All') }}</flux:select.option>
                 <flux:select.option value="paid">{{ __('Paid') }}</flux:select.option>
                 <flux:select.option value="issued">{{ __('Issued') }}</flux:select.option>
                 <flux:select.option value="void">{{ __('Void') }}</flux:select.option>
             </flux:select>
+            </div>
         </div>
 
         @if($this->invoices->isNotEmpty())
@@ -61,7 +68,8 @@
                             <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Router') }}</th>
                             <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Amount') }}</th>
                             <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Status') }}</th>
-                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Date') }}</th>
+                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Issued') }}</th>
+                            <th class="px-5 py-3 text-start text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Due') }}</th>
                             <th class="px-5 py-3 text-end text-xs font-semibold text-gray-500 dark:text-neutral-400 uppercase tracking-wider">{{ __('Action') }}</th>
                         </tr>
                     </thead>
@@ -88,6 +96,9 @@
                                 </td>
                                 <td class="px-5 py-3 whitespace-nowrap text-xs text-gray-400 dark:text-neutral-500">
                                     {{ $invoice->issued_at?->format('d M Y') ?? $invoice->created_at->format('d M Y') }}
+                                </td>
+                                <td class="px-5 py-3 whitespace-nowrap text-xs text-gray-400 dark:text-neutral-500">
+                                    {{ $invoice->due_at?->format('d M Y') ?? '—' }}
                                 </td>
                                 <td class="px-5 py-3 whitespace-nowrap text-end">
                                     <a href="{{ route('customer.invoices.download', $invoice) }}" target="_blank"

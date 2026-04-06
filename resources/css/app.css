@@ -47,6 +47,36 @@
     }
 }
 
+/**
+ * Sidebar nav: scroll with wheel / trackpad only — no visible scrollbar (Chrome, Safari, Firefox, Edge).
+ */
+@layer utilities {
+    .sidebar-scroll {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+        scrollbar-color: transparent transparent;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar {
+        display: none !important;
+        width: 0 !important;
+        height: 0 !important;
+        background: transparent !important;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar-track {
+        background: transparent !important;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar-thumb {
+        background: transparent !important;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar-corner {
+        background: transparent !important;
+    }
+}
+
 [data-flux-field]:not(ui-radio, ui-checkbox) {
     @apply grid gap-2;
 }
